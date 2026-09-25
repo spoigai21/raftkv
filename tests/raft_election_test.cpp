@@ -177,7 +177,7 @@ TEST(RaftElection, ChaosKeepsElectionSafetyAndRecovers) {
     for (std::uint64_t seed : seeds(200)) {
         for (int n : {3, 5}) {
             RaftCluster c(seed, n);
-            c.sim().keep_log_lines(false);   // hash only; rerun one seed to see the log
+            c.quiet();   // hash only; rerun one seed to see the log
             c.schedule_chaos(seed, 10s);
             c.sim().start();
             c.sim().run_until(raft::Time{10s});

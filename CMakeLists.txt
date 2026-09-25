@@ -25,7 +25,7 @@ target_compile_options(raftkv_warnings INTERFACE -Wall -Wextra -Wpedantic -Werro
 # SYSTEM so they never trip -Werror in the code that includes them.
 set(RAFTKV_PROTO_OUT ${CMAKE_CURRENT_BINARY_DIR}/proto)
 file(MAKE_DIRECTORY ${RAFTKV_PROTO_OUT})
-add_library(raftkv_proto STATIC src/raft/messages.proto)
+add_library(raftkv_proto STATIC src/raft/messages.proto src/kv/kv.proto)
 target_link_libraries(raftkv_proto PUBLIC protobuf::libprotobuf-lite)
 target_include_directories(raftkv_proto SYSTEM PUBLIC ${RAFTKV_PROTO_OUT})
 protobuf_generate(
@@ -37,6 +37,10 @@ protobuf_generate(
 
 add_library(raftkv
     src/version.cpp
+    src/kv/client.cpp
+    src/kv/messages.cpp
+    src/kv/server.cpp
+    src/kv/state_machine.cpp
     src/raft/messages.cpp
     src/raft/raft.cpp
     src/sim/sim.cpp
@@ -71,6 +75,8 @@ if(RAFTKV_BUILD_TESTS)
         tests/log_codec_test.cpp
         tests/file_storage_test.cpp
         tests/raft_persistence_test.cpp
+        tests/kv_state_machine_test.cpp
+        tests/kv_test.cpp
     )
     target_link_libraries(raftkv_tests PRIVATE raftkv raftkv_warnings GTest::gtest_main)
     gtest_discover_tests(raftkv_tests DISCOVERY_MODE PRE_TEST)

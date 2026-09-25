@@ -1,0 +1,42 @@
+// Wire and log formats for the key-value layer. As with raft/messages.proto, only
+// kv/messages.cpp touches these generated types.
+syntax = "proto3";
+
+package raftkv.kv.pb;
+
+option optimize_for = LITE_RUNTIME;
+
+enum Op {
+  OP_UNSPECIFIED = 0;
+  GET = 1;
+  PUT = 2;
+  APPEND = 3;
+}
+
+// What goes into the Raft log. (client_id, seq) identifies it for duplicate detection.
+message Command {
+  uint64 client_id = 1;
+  uint64 seq = 2;
+  Op op = 3;
+  string key = 4;
+  bytes value = 5;
+}
+
+message KvRequest {
+  Command command = 1;
+}
+
+enum Status {
+  STATUS_UNSPECIFIED = 0;
+  OK = 1;
+  NOT_LEADER = 2;
+}
+
+message KvReply {
+  uint64 client_id = 1;
+  uint64 seq = 2;
+  Status status = 3;
+  bytes value = 4;        // Get: the value; Put/Append: empty
+  bool found = 5;         // Get: whether the key existed
+  uint32 leader_hint = 6; // NOT_LEADER: who to try instead, 0 if unknown
+}

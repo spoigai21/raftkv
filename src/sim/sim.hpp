@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <set>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -28,6 +29,9 @@ struct Faults {
     // Empty: everyone can talk. Otherwise two nodes can talk only if they are in the same
     // group, and a node listed in no group is isolated. {{1, 2}, {3}} cuts node 3 off.
     std::vector<std::vector<raft::NodeId>> partitions;
+    // Nodes that partitions never cut off, e.g. clients when a test partitions only servers.
+    // Loss and delay still apply to them.
+    std::set<raft::NodeId> unpartitioned;
 };
 
 struct SimStats {

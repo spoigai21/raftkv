@@ -113,7 +113,7 @@ TEST(RaftPersistence, ChaosOnRealFiles) {
     for (std::uint64_t seed : seeds(20)) {
         TempDir dir;
         RaftCluster c(seed, 3);
-        c.sim().keep_log_lines(false);
+        c.quiet();
         c.use_file_storage(dir.path());
         c.schedule_chaos(seed, 5s);
         c.schedule_workload(20ms, raft::Time{5s});

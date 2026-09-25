@@ -136,6 +136,7 @@ void Sim::log(std::string_view what) {
 
 bool Sim::connected(raft::NodeId a, raft::NodeId b) const {
     if (a == b || faults_.partitions.empty()) return true;
+    if (faults_.unpartitioned.contains(a) || faults_.unpartitioned.contains(b)) return true;
     for (const auto& group : faults_.partitions) {
         const bool has_a = std::ranges::find(group, a) != group.end();
         const bool has_b = std::ranges::find(group, b) != group.end();

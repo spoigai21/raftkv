@@ -17,6 +17,9 @@
 #include <utility>
 #include <vector>
 
+#include "kv/client.hpp"
+#include "kv/messages.hpp"
+#include "kv/server.hpp"
 #include "raft/messages.hpp"
 #include "raft/raft.hpp"
 #include "sim/sim.hpp"
@@ -26,12 +29,22 @@ namespace raftkv::test {
 
 using namespace std::chrono_literals;
 
+struct ClusterOptions {
+    bool kv = false;   // servers are kv::Server (Raft + state machine) instead of bare Raft
+    int clients = 0;   // kv::Client nodes, ids 101, 102, ...; partitions never cut them off
+};
+
 class RaftCluster {
 public:
-    RaftCluster(std::uint64_t seed, int n)
-        : ids_(make_ids(n)),
-          sim_(seed, ids_, [this](raft::NodeId me, raft::Env& env) { return make_node(me, env); }) {
-        sim_.describe_messages_with(raft::describe);
+    RaftCluster(std::uint64_t seed, int n, ClusterOptions options = {})
+        : options_(options),
+          ids_(make_ids(n)),
+          client_ids_(make_client_ids(options.clients)),
+          sim_(seed, all_ids(), [this](raft::NodeId me, raft::Env& env) { return make_node(me, env); }) {
+        sim_.describe_messages_with([](const raft::Message& m) {
+            return kv::is_kv_message(m) ? kv::describe(m) : raft::describe(m);
+        });
+        sim_.faults().unpartitioned.insert(client_ids_.begin(), client_ids_.end());
         sim_.after_each_event([this] { check_invariants(); });
         sim_.faults().delay_min = 1ms;
         sim_.faults().delay_max = 10ms;
@@ -52,6 +65,12 @@ public:
 
     sim::Sim& sim() { return sim_; }
 
+    // Keeps only the log hash, not the lines, to save memory on long runs, unless
+    // RAFTKV_DUMP_LOG is set, since then the lines are the point.
+    void quiet() {
+        if (std::getenv("RAFTKV_DUMP_LOG") == nullptr) sim_.keep_log_lines(false);
+    }
+
     // Every node keeps its state in FileStorage under `root`/node-<id>. Call before start().
     // Simulated crashes are process crashes, so fsync is skipped (Sync::ProcessCrashOnly):
     // what they test is recovery from the files, not the disk's durability.
@@ -66,7 +85,17 @@ public:
         });
     }
     const std::vector<raft::NodeId>& ids() const { return ids_; }
-    raft::Raft* raft(raft::NodeId id) { return dynamic_cast<raft::Raft*>(sim_.node(id)); }
+    const std::vector<raft::NodeId>& client_ids() const { return client_ids_; }
+
+    // The Raft node inside server `id`, or nullptr while it is down.
+    raft::Raft* raft(raft::NodeId id) {
+        raft::Node* n = sim_.node(id);
+        if (auto* r = dynamic_cast<raft::Raft*>(n)) return r;
+        if (auto* s = dynamic_cast<kv::Server*>(n)) return &s->raft();
+        return nullptr;
+    }
+    kv::Server* server(raft::NodeId id) { return dynamic_cast<kv::Server*>(sim_.node(id)); }
+    kv::Client& client(raft::NodeId id) { return sim_.node_as<kv::Client>(id); }
 
     // The leader of the newest term: up, not paused, and no live node has seen a later term.
     std::optional<raft::NodeId> leader() {
@@ -213,6 +242,18 @@ public:
     }
 
 private:
+    static std::vector<raft::NodeId> make_client_ids(int n) {
+        std::vector<raft::NodeId> ids;
+        for (int i = 1; i <= n; ++i) ids.push_back(static_cast<raft::NodeId>(100 + i));
+        return ids;
+    }
+
+    std::vector<raft::NodeId> all_ids() const {
+        std::vector<raft::NodeId> all = ids_;
+        all.insert(all.end(), client_ids_.begin(), client_ids_.end());
+        return all;
+    }
+
     static std::vector<raft::NodeId> make_ids(int n) {
         std::vector<raft::NodeId> ids;
         for (int i = 1; i <= n; ++i) ids.push_back(static_cast<raft::NodeId>(i));
@@ -222,13 +263,16 @@ private:
     // Called on every boot. The state machine (here, a list of applied entries) is volatile,
     // so it starts empty and Raft replays the log into it.
     std::unique_ptr<raft::Node> make_node(raft::NodeId me, raft::Env& env) {
+        if (std::ranges::find(client_ids_, me) != client_ids_.end()) {
+            return std::make_unique<kv::Client>(kv::ClientConfig{.servers = ids_}, env);
+        }
         raft::RaftConfig cfg{.id = me, .peers = {}};
         for (raft::NodeId p : ids_) if (p != me) cfg.peers.push_back(p);
         applied_[me].clear();
         commit_checked_[me] = 0;
-        return std::make_unique<raft::Raft>(cfg, env, [this, me](const raft::LogEntry& e) {
-            on_apply(me, e);
-        });
+        auto observe = [this, me](const raft::LogEntry& e) { on_apply(me, e); };
+        if (options_.kv) return std::make_unique<kv::Server>(cfg, env, observe);
+        return std::make_unique<raft::Raft>(cfg, env, observe);
     }
 
     void on_apply(raft::NodeId id, const raft::LogEntry& e) {
@@ -280,12 +324,18 @@ private:
                     violation(std::format("index {} committed as term {} and term {}", i,
                                           it->second.term, e->term));
                 }
+                // The term it was committed in: a leader's commit is seen in the same event
+                // that makes it (followers only learn of commits from a leader, later).
+                commit_term_.emplace(i, term);
             }
             commit_checked_[id] = std::max(commit_checked_[id], r->commit_index());
 
-            // Leader Completeness: a leader holds every entry committed before its term.
+            // Leader Completeness (Figure 3): a leader holds every entry committed in an earlier
+            // term. Not entries committed in later terms: a node paused mid-election can win an
+            // old term after newer terms have committed more, and then step down at once.
             if (r->role() == raft::Role::Leader && checked_leaders_.emplace(id, term).second) {
                 for (const auto& [i, e] : committed_) {
+                    if (commit_term_.at(i) >= term) continue;
                     const raft::LogEntry* mine = r->entry_at(i);
                     if (mine == nullptr || !(*mine == e)) {
                         violation(std::format("leader {} of term {} lacks committed index {}", id,
@@ -312,12 +362,15 @@ private:
         }
     }
 
+    ClusterOptions options_;
     std::vector<raft::NodeId> ids_;
+    std::vector<raft::NodeId> client_ids_;
     sim::Sim sim_;
     std::map<raft::Term, raft::NodeId> leader_of_term_;
     std::map<raft::NodeId, raft::Term> highest_term_;
     std::map<std::pair<raft::NodeId, raft::Term>, raft::NodeId> vote_in_term_;
     std::map<raft::Index, raft::LogEntry> committed_;
+    std::map<raft::Index, raft::Term> commit_term_;
     std::map<raft::NodeId, raft::Index> commit_checked_;
     std::set<std::pair<raft::NodeId, raft::Term>> checked_leaders_;
     std::map<raft::NodeId, std::vector<raft::LogEntry>> applied_;

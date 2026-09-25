@@ -632,6 +632,23 @@ that comparison is a good write-up section.
 
 **Done when:** a client survives leader failover mid-request with no duplicated `Append`.
 
+*As built, part 1* (`src/kv/`):
+
+- `StateMachine` deduplicates **every** op by `(client_id, seq)`, `Get` included. That is
+  simpler than special-casing reads, and a retried `Get` gets the reply the original saw.
+- `Server` wraps `Raft` and proposes each request. It replies when the entry applies, and
+  fails pending requests with `NotLeader` once deposed. It also checks, as a backstop, that
+  the entry applied at a pending index is really that request. Each of these alone keeps
+  replies correct; removing both lets chaos tell a client "OK" for a lost append.
+- `Client` follows `NotLeader` hints, backs off 20 ms when there is no hint, moves to the
+  next server after a 500 ms timeout, and always retries with the same seq.
+- The done-gate test kills the leader in the instant between **commit and apply**, so no
+  reply is ever sent and the retry hits an entry that is already committed. It runs 10
+  times × 20 seeds. Chaos with 3 clients × 50 seeds checks that each client's appends land
+  exactly once and in order.
+- Planted bugs (no dedup, dedup not keyed by client, retry with a new seq) are all caught.
+- It found a bug in the test harness: see `docs/postmortems/001-leader-completeness-check-too-strict.md`.
+
 **Also in this phase: the real server.** No earlier phase builds it: the Asio transport
 (length-prefixed frames behind `Env::send`), and `raftkvd`/`raftkvctl` running `Raft` +
 `FileStorage` as separate processes. Phase 4's cluster-wide "`kill -9` every node" runs in

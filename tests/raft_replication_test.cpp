@@ -145,7 +145,7 @@ TEST(RaftReplication, ChaosWithWorkloadKeepsEveryInvariantAndConverges) {
     for (std::uint64_t seed : seeds(100)) {
         for (int n : {3, 5}) {
             RaftCluster c(seed, n);
-            c.sim().keep_log_lines(false);
+            c.quiet();
             c.schedule_chaos(seed, 10s);
             c.schedule_workload(20ms, raft::Time{10s});
             c.sim().start();

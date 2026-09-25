@@ -3,7 +3,7 @@
 What this project is, why it exists, and what counts as done.
 The step-by-step build is in `raftkv-implementation.md`.
 
-**Status:** Phase 4 (persistence and crash recovery). No KV API or real server processes yet.
+**Status:** Phase 5, part 1 (KV state machine and client, in the simulator). No real server processes yet.
 
 ---
 
