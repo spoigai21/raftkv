@@ -60,6 +60,11 @@ void Sim::crash(raft::NodeId id, SimStorage::CrashMode mode) {
     s.timers.clear();
     s.deferred.clear();
     s.paused = false;
+    if (storage_factory_) {
+        s.external.reset();   // like kill -9: the process dies, its page cache survives
+        log(std::format("crash {}", id));
+        return;
+    }
     const std::size_t lost = s.storage.crash(mode, rng_);
     log(std::format("crash {} lost_unsynced_ops={}", id, lost));
 }
@@ -214,6 +219,16 @@ std::string Sim::describe(const raft::Message& m) const {
 
 void Sim::boot(raft::NodeId id, std::string_view why) {
     NodeSlot& s = slot(id);
+    if (storage_factory_) {
+        auto opened = storage_factory_(id);
+        if (!opened) {
+            s.boot_error = opened.error();
+            log(std::format("{} {} refused: storage did not open", why, id));
+            return;   // stays down
+        }
+        s.boot_error.clear();
+        s.external = std::move(*opened);
+    }
     s.node = factory_(id, *s.env);
     log(std::format("{} {}", why, id));
     s.node->on_start();
@@ -235,7 +250,10 @@ void Sim::NodeEnv::send(raft::Message m) {
     sim_.send(std::move(m));
 }
 
-raft::Storage& Sim::NodeEnv::storage() { return sim_.slot(id_).storage; }
+raft::Storage& Sim::NodeEnv::storage() {
+    NodeSlot& s = sim_.slot(id_);
+    return s.external ? *s.external : s.storage;
+}
 
 void Sim::NodeEnv::trace(std::string_view what) { sim_.log(std::format("node {}: {}", id_, what)); }
 

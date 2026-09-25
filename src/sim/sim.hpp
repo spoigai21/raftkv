@@ -10,6 +10,8 @@
 #include <utility>
 #include <vector>
 
+#include <tl/expected.hpp>
+
 #include "raft/env.hpp"
 #include "sim/rng.hpp"
 #include "sim/sim_storage.hpp"
@@ -43,6 +45,10 @@ class Sim {
 public:
     using NodeFactory =
         std::function<std::unique_ptr<raft::Node>(raft::NodeId, raft::Env&)>;
+    // Opens a node's durable storage; called on every boot, so restarts exercise recovery.
+    // An error means the node refuses to start and stays down.
+    using StorageFactory =
+        std::function<tl::expected<std::unique_ptr<raft::Storage>, std::string>(raft::NodeId)>;
 
     Sim(std::uint64_t seed, std::vector<raft::NodeId> ids, NodeFactory factory);
     Sim(const Sim&) = delete;
@@ -53,6 +59,13 @@ public:
     Rng& rng() { return rng_; }
     Faults& faults() { return faults_; }
     const SimStats& stats() const { return stats_; }
+
+    // Replaces SimStorage with real storage (e.g. FileStorage) for every node. Call before
+    // start(). A crash then closes the storage, like kill -9: unsynced writes are still in
+    // the OS page cache, so nothing is lost unless the machine itself goes down.
+    void use_storage(StorageFactory factory) { storage_factory_ = std::move(factory); }
+    // Why the node's last boot failed, if it did.
+    const std::string& boot_error(raft::NodeId id) const { return slot(id).boot_error; }
 
     // Boots every node (in id order) at the current time.
     void start();
@@ -123,6 +136,8 @@ private:
         std::unique_ptr<NodeEnv> env;
         std::unique_ptr<raft::Node> node;   // null while crashed or before start()
         SimStorage storage;
+        std::unique_ptr<raft::Storage> external;   // from use_storage(), open while up
+        std::string boot_error;
         std::uint64_t incarnation = 0;
         bool paused = false;
         std::map<raft::TimerId, raft::TimerTag> timers;   // live timers
@@ -153,6 +168,7 @@ private:
     std::uint64_t seed_;
     Rng rng_;
     NodeFactory factory_;
+    StorageFactory storage_factory_;
     Faults faults_;
     SimStats stats_;
 

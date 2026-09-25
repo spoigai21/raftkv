@@ -566,6 +566,42 @@ every push and the corpus committed under `tests/fuzz/corpus`.
 unchanged; a truncated or bit-flipped tail makes the node refuse to serve rather than serve
 garbage.
 
+*As built* (`src/store/`):
+
+- **Record format:** `[len u32][payload_crc u32][header_crc u32][payload]`. The plan's
+  `[len][crc][payload]` could not tell corruption from a torn write. A bit flip in a length
+  field makes a record appear to run past end-of-file, which looks exactly like a torn write,
+  so recovery would silently truncate there and drop every synced record after it. The
+  header checksum makes a damaged length detectable as corruption.
+- **Recovery rules** (`scan()`):
+  - an incomplete last record, or zeros after the last record, is a torn tail: cut it off;
+  - anything else is corruption: refuse to start.
+  - A torn write that happens to leave a complete-length record with the wrong contents is
+    also refused. That errs toward unavailable, never toward losing acknowledged data.
+- `hard_state` is replaced atomically (tmp, fsync, rename, fsync directory) and has its
+  own checksum. On macOS every sync uses `F_FULLFSYNC`.
+- **Evidence:**
+  - every single-bit flip in a sample log is detected;
+  - every cut point recovers exactly the complete prefix;
+  - a real `fork()` + `SIGKILL` test never loses an entry the child acknowledged;
+  - the simulator runs the whole cluster on `FileStorage`, killing every node five times
+    mid-workload. Each restart goes through recovery, with the invariant checker running
+    after every event;
+  - a node with a corrupted log refuses to start while the majority keeps committing;
+  - libFuzzer ran 1.08M inputs in 60 s with no findings (CI fuzzes 60 s per push). A
+    planted out-of-bounds read was found in seconds;
+  - planted storage bugs are all caught.
+- **Limit, stated plainly: `kill -9` cannot test `fsync`.** After `kill -9` the data is still
+  in the page cache, so those tests pass with or without `fsync`. What shows that entries
+  are synced before they are acknowledged is `SimStorage`, which does drop unsynced writes
+  on a crash. Proving the disk's durability would need power-loss testing, e.g. LazyFS or
+  `dm-log-writes`, which is out of scope. The simulator's file-backed tests use
+  `Sync::ProcessCrashOnly` (no fsync), since they only crash processes. With fsync they
+  spend 95% of their time in `F_FULLFSYNC`.
+- Recovering a node whose log is corrupt needs an operator. Simply wiping its data
+  directory is **not** safe in Raft: the node would forget its vote and could vote twice in
+  one term.
+
 ---
 
 ## Phase 5 — KV state machine and client
@@ -595,6 +631,11 @@ lease reads, **state the consistency you now provide** and measure the latency d
 that comparison is a good write-up section.
 
 **Done when:** a client survives leader failover mid-request with no duplicated `Append`.
+
+**Also in this phase: the real server.** No earlier phase builds it: the Asio transport
+(length-prefixed frames behind `Env::send`), and `raftkvd`/`raftkvctl` running `Raft` +
+`FileStorage` as separate processes. Phase 4's cluster-wide "`kill -9` every node" runs in
+the simulator until then. The real-process version belongs to Phase 7's process suite.
 
 ---
 

@@ -4,7 +4,7 @@ A replicated key–value store in C++20, built on the Raft consensus algorithm.
 It runs as 3 or 5 processes on one machine, talking over real sockets, and keeps working when a minority of them crash.
 It is a learning project: one Raft group, no transactions or indexes, and it isn't built to be fast.
 
-> **Status:** Phase 3 — leader election and log replication work in the simulator. No on-disk storage yet.
+> **Status:** Phase 4 — election, replication and crash-safe on-disk storage. No KV API or real server processes yet.
 
 ## What it will do
 

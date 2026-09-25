@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <format>
 #include <map>
 #include <memory>
@@ -19,6 +20,7 @@
 #include "raft/messages.hpp"
 #include "raft/raft.hpp"
 #include "sim/sim.hpp"
+#include "store/file_storage.hpp"
 
 namespace raftkv::test {
 
@@ -49,6 +51,20 @@ public:
     }
 
     sim::Sim& sim() { return sim_; }
+
+    // Every node keeps its state in FileStorage under `root`/node-<id>. Call before start().
+    // Simulated crashes are process crashes, so fsync is skipped (Sync::ProcessCrashOnly):
+    // what they test is recovery from the files, not the disk's durability.
+    void use_file_storage(const std::filesystem::path& root) {
+        sim_.use_storage([root](raft::NodeId id)
+                             -> tl::expected<std::unique_ptr<raft::Storage>, std::string> {
+            return store::FileStorage::open(root / std::format("node-{}", id),
+                                            store::FileStorage::Sync::ProcessCrashOnly)
+                .map([](std::unique_ptr<store::FileStorage> fs) -> std::unique_ptr<raft::Storage> {
+                    return fs;
+                });
+        });
+    }
     const std::vector<raft::NodeId>& ids() const { return ids_; }
     raft::Raft* raft(raft::NodeId id) { return dynamic_cast<raft::Raft*>(sim_.node(id)); }
 

@@ -43,7 +43,7 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "RAFTKV_FUZZ": "ON",
         "RAFTKV_BUILD_BENCH": "OFF",
-        "CMAKE_CXX_FLAGS": "-fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer"
+        "CMAKE_CXX_FLAGS": "-fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined"
       }
     }
   ],

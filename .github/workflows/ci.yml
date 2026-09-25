@@ -76,3 +76,52 @@ jobs:
       - name: Benchmark smoke test
         if: matrix.preset == 'rel'
         run: ./build/rel/raftkv_bench --benchmark_min_time=0.01s
+
+  # libFuzzer on the on-disk log decoder (implementation guide Phase 4). Clang only.
+  fuzz:
+    runs-on: ubuntu-24.04
+    env:
+      CC: clang-17
+      CXX: clang++-17
+      VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.vcpkg-cache,readwrite
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Set up vcpkg at the manifest baseline
+        run: |
+          baseline=$(jq -r '."builtin-baseline"' vcpkg.json)
+          git clone https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"
+          git -C "$VCPKG_ROOT" checkout "$baseline"
+          "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+          mkdir -p .vcpkg-cache
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: .vcpkg-cache
+          key: vcpkg-clang-17-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-clang-17-
+
+      - name: Configure
+        run: cmake --preset fuzz
+
+      - name: Build
+        run: cmake --build --preset fuzz --target log_decoder_fuzz
+
+      # Work on a copy so the committed seed corpus stays small and reviewed.
+      - name: Fuzz for 60 seconds
+        run: |
+          mkdir -p build/fuzz/corpus
+          cp tests/fuzz/corpus/* build/fuzz/corpus/
+          ./build/fuzz/log_decoder_fuzz -max_total_time=60 -print_final_stats=1 build/fuzz/corpus
+
+      - name: Keep any crashing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash
+          path: crash-*

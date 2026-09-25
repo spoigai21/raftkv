@@ -3,7 +3,7 @@
 What this project is, why it exists, and what counts as done.
 The step-by-step build is in `raftkv-implementation.md`.
 
-**Status:** Phase 3 (log replication). No on-disk storage yet.
+**Status:** Phase 4 (persistence and crash recovery). No KV API or real server processes yet.
 
 ---
 

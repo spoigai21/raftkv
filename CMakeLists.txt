@@ -41,6 +41,8 @@ add_library(raftkv
     src/raft/raft.cpp
     src/sim/sim.cpp
     src/sim/sim_storage.cpp
+    src/store/file_storage.cpp
+    src/store/log_codec.cpp
 )
 target_include_directories(raftkv PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(raftkv
@@ -66,9 +68,18 @@ if(RAFTKV_BUILD_TESTS)
         tests/sim_test.cpp
         tests/raft_election_test.cpp
         tests/raft_replication_test.cpp
+        tests/log_codec_test.cpp
+        tests/file_storage_test.cpp
+        tests/raft_persistence_test.cpp
     )
     target_link_libraries(raftkv_tests PRIVATE raftkv raftkv_warnings GTest::gtest_main)
     gtest_discover_tests(raftkv_tests DISCOVERY_MODE PRE_TEST)
+endif()
+
+if(RAFTKV_FUZZ)
+    add_executable(log_decoder_fuzz tests/fuzz/log_decoder_fuzz.cpp)
+    target_link_libraries(log_decoder_fuzz PRIVATE raftkv raftkv_warnings)
+    target_link_options(log_decoder_fuzz PRIVATE -fsanitize=fuzzer)
 endif()
 
 if(RAFTKV_BUILD_BENCH)
