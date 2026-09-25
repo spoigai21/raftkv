@@ -54,13 +54,17 @@ public:
     explicit ProbeNode(raft::Env& env) : env_(env) {}
 
     void on_start() override { ++starts; }
-    void on_message(const raft::Message& m) override { messages.push_back(m.payload); }
+    void on_message(const raft::Message& m) override {
+        messages.push_back(m.payload);
+        inbox.push_back(m);
+    }
     void on_timer(raft::TimerId, raft::TimerTag tag) override { timers.push_back(tag); }
 
     raft::Env& env() { return env_; }
 
     int starts = 0;
-    std::vector<std::string> messages;
+    std::vector<std::string> messages;   // payloads only
+    std::vector<raft::Message> inbox;    // everything, in arrival order
     std::vector<raft::TimerTag> timers;
 
 private:

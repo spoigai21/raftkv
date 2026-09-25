@@ -1,0 +1,39 @@
+// Wire format for Raft RPCs. Raft code never sees these types directly: it works with the
+// plain structs in raft/messages.hpp, which encode to and decode from these.
+syntax = "proto3";
+
+package raftkv.raft.pb;
+
+option optimize_for = LITE_RUNTIME;
+
+message Entry {
+  uint64 term = 1;
+  uint64 index = 2;
+  bytes command = 3;
+}
+
+message RequestVote {
+  uint64 term = 1;
+  uint32 candidate_id = 2;
+  uint64 last_log_index = 3;
+  uint64 last_log_term = 4;
+}
+
+message RequestVoteReply {
+  uint64 term = 1;
+  bool vote_granted = 2;
+}
+
+message AppendEntries {
+  uint64 term = 1;
+  uint32 leader_id = 2;
+  uint64 prev_log_index = 3;
+  uint64 prev_log_term = 4;
+  repeated Entry entries = 5;
+  uint64 leader_commit = 6;
+}
+
+message AppendEntriesReply {
+  uint64 term = 1;
+  bool success = 2;
+}

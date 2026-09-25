@@ -148,6 +148,7 @@ struct Env {
     virtual void send(Message) = 0;                        // Transport
     virtual Storage& storage() = 0;                        // §3.4
     virtual uint64_t random() = 0;                         // seeded PRNG in sim
+    virtual void trace(std::string_view) = 0;              // a note in the event log
 };
 ```
 
@@ -447,6 +448,21 @@ Three rules that are easy to get wrong:
 
 **Done when:** three simulated nodes elect exactly one leader; killing the leader elects a
 new one; the old leader steps down on rejoin — and all of it replays from a seed.
+
+*As built* (`src/raft/raft.cpp`, `src/raft/messages.{proto,cpp}`):
+
+- RPCs are plain structs (`raft/messages.hpp`); protobuf-lite is only the wire format, and
+  `AppendEntries` already carries `entries` and `leader_commit` for Phase 3.
+- The test harness (`tests/raft_cluster.hpp`) checks **Election Safety** (one leader per
+  term), "terms never go backwards" and "one vote per term, across crashes" **after every
+  simulator event**, and runs seeded chaos: random crashes, restarts, partitions, pauses
+  and loss, then heals and requires a leader within 3 s. 200 seeds × {3, 5} nodes.
+- Planted bugs (double voting, unpersisted vote, no log up-to-date check, keeping the vote
+  on step-down) are each caught by these tests.
+- `RAFTKV_SEED=N RAFTKV_DUMP_LOG=1` prints the full event log of one run.
+- **No PreVote.** A node that was partitioned away comes back with an inflated term and
+  forces an election. That is standard Raft (§9.6 of the thesis adds PreVote); the tests
+  assert the cluster recovers, not that no election happens.
 
 ---
 

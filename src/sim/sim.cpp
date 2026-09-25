@@ -12,10 +12,6 @@ bool later(const auto& a, const auto& b) {
     return std::pair(a.at, a.seq) > std::pair(b.at, b.seq);
 }
 
-std::string describe(const raft::Message& m) {
-    return std::format("{}->{} {} len={}", m.from, m.to, m.method, m.payload.size());
-}
-
 }  // namespace
 
 Sim::Sim(std::uint64_t seed, std::vector<raft::NodeId> ids, NodeFactory factory)
@@ -122,6 +118,7 @@ bool Sim::step() {
     queue_.pop_back();
     now_ = ev.at;
     ev.fn();   // may push more events; `ev` is already out of the queue
+    if (after_each_event_) after_each_event_();
     return true;
 }
 
@@ -209,6 +206,12 @@ void Sim::fire_timer(raft::NodeId id, raft::TimerId timer, std::uint64_t incarna
     s.node->on_timer(timer, tag);
 }
 
+std::string Sim::describe(const raft::Message& m) const {
+    const std::string what =
+        describe_ ? describe_(m) : std::format("{} len={}", m.method, m.payload.size());
+    return std::format("{}->{} {}", m.from, m.to, what);
+}
+
 void Sim::boot(raft::NodeId id, std::string_view why) {
     NodeSlot& s = slot(id);
     s.node = factory_(id, *s.env);
@@ -233,5 +236,7 @@ void Sim::NodeEnv::send(raft::Message m) {
 }
 
 raft::Storage& Sim::NodeEnv::storage() { return sim_.slot(id_).storage; }
+
+void Sim::NodeEnv::trace(std::string_view what) { sim_.log(std::format("node {}: {}", id_, what)); }
 
 }  // namespace raftkv::sim

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string_view>
 
 #include "raft/storage.hpp"
 #include "raft/types.hpp"
@@ -28,6 +29,9 @@ public:
 
     // Uniform 64-bit value from a seeded stream in the simulator.
     virtual std::uint64_t random() = 0;
+
+    // A human-readable note for the event log ("became leader term 3"). No effect on behaviour.
+    virtual void trace(std::string_view what) = 0;
 };
 
 // What the environment drives. A node never blocks and never runs on more than one

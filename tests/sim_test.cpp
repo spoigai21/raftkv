@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "sim_test_nodes.hpp"
+#include "test_seeds.hpp"
 
 namespace raftkv {
 namespace {
@@ -21,16 +22,9 @@ using raft::Time;
 using sim::Sim;
 using test::GossipNode;
 using test::ProbeNode;
+using test::seeds;
 
 Time at(Duration d) { return Time{d}; }
-
-// Seeds to run: RAFTKV_SEED=N replays just that one, otherwise 1..count.
-std::vector<std::uint64_t> seeds(std::uint64_t count) {
-    if (const char* s = std::getenv("RAFTKV_SEED")) return {std::strtoull(s, nullptr, 10)};
-    std::vector<std::uint64_t> out;
-    for (std::uint64_t i = 1; i <= count; ++i) out.push_back(i);
-    return out;
-}
 
 Sim::NodeFactory probes() {
     return [](NodeId, raft::Env& env) { return std::make_unique<ProbeNode>(env); };

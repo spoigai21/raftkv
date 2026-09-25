@@ -21,15 +21,31 @@ find_package(tl-expected CONFIG REQUIRED)
 add_library(raftkv_warnings INTERFACE)
 target_compile_options(raftkv_warnings INTERFACE -Wall -Wextra -Wpedantic -Werror)
 
+# Generated protobuf code: its own library, without raftkv_warnings, and its headers are
+# SYSTEM so they never trip -Werror in the code that includes them.
+set(RAFTKV_PROTO_OUT ${CMAKE_CURRENT_BINARY_DIR}/proto)
+file(MAKE_DIRECTORY ${RAFTKV_PROTO_OUT})
+add_library(raftkv_proto STATIC src/raft/messages.proto)
+target_link_libraries(raftkv_proto PUBLIC protobuf::libprotobuf-lite)
+target_include_directories(raftkv_proto SYSTEM PUBLIC ${RAFTKV_PROTO_OUT})
+protobuf_generate(
+    TARGET raftkv_proto
+    LANGUAGE cpp
+    IMPORT_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/src
+    PROTOC_OUT_DIR ${RAFTKV_PROTO_OUT}
+)
+
 add_library(raftkv
     src/version.cpp
+    src/raft/messages.cpp
+    src/raft/raft.cpp
     src/sim/sim.cpp
     src/sim/sim_storage.cpp
 )
 target_include_directories(raftkv PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(raftkv
     PUBLIC tl::expected
-    PRIVATE raftkv_warnings
+    PRIVATE raftkv_proto raftkv_warnings
 )
 target_compile_definitions(raftkv PRIVATE RAFTKV_VERSION="${PROJECT_VERSION}")
 
@@ -48,6 +64,7 @@ if(RAFTKV_BUILD_TESTS)
         tests/smoke_test.cpp
         tests/sim_storage_test.cpp
         tests/sim_test.cpp
+        tests/raft_election_test.cpp
     )
     target_link_libraries(raftkv_tests PRIVATE raftkv raftkv_warnings GTest::gtest_main)
     gtest_discover_tests(raftkv_tests DISCOVERY_MODE PRE_TEST)

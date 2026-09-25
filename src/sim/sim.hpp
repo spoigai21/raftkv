@@ -93,6 +93,15 @@ public:
     void keep_log_lines(bool keep) { keep_log_lines_ = keep; }
     std::string log_tail(std::size_t n) const;
 
+    // How messages appear in the log after "send 1->2 ". Default: method and payload size.
+    void describe_messages_with(std::function<std::string(const raft::Message&)> fn) {
+        describe_ = std::move(fn);
+    }
+
+    // Runs after every event. Tests use it to check invariants continuously, so a violation
+    // is caught at the event that caused it rather than at the end of the run.
+    void after_each_event(std::function<void()> fn) { after_each_event_ = std::move(fn); }
+
 private:
     class NodeEnv final : public raft::Env {
     public:
@@ -103,6 +112,7 @@ private:
         void send(raft::Message m) override;
         raft::Storage& storage() override;
         std::uint64_t random() override { return sim_.rng_.next(); }
+        void trace(std::string_view what) override;
 
     private:
         Sim& sim_;
@@ -138,6 +148,7 @@ private:
     void receive(raft::Message m);   // at the node: dropped if down, deferred if paused
     void fire_timer(raft::NodeId id, raft::TimerId timer, std::uint64_t incarnation);
     void boot(raft::NodeId id, std::string_view why);
+    std::string describe(const raft::Message& m) const;
 
     std::uint64_t seed_;
     Rng rng_;
@@ -155,6 +166,8 @@ private:
     std::vector<std::string> log_;
     std::uint64_t log_hash_ = 0xcbf29ce484222325ULL;   // FNV-1a offset basis
     bool keep_log_lines_ = true;
+    std::function<std::string(const raft::Message&)> describe_;
+    std::function<void()> after_each_event_;
 };
 
 }  // namespace raftkv::sim
