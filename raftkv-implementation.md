@@ -183,6 +183,7 @@ public:
     virtual void append(std::span<const LogEntry>) = 0;
     virtual void truncate_suffix(Index from) = 0;   // Raft deletes conflicting entries
     virtual void sync() = 0;
+    virtual PersistentState load() const = 0;       // what a restarting node reads back
 };
 ```
 
@@ -353,6 +354,10 @@ public:
 `AsioTransport` for the real cluster; `SimTransport` for tests. Both sit behind the `Env`
 of §3.2.
 
+*As built:* there is no separate `Transport` class. `Env::send` is the transport, and the
+simulator implements it directly (`src/sim/sim.cpp`). Receiving is `Node::on_message`, called
+by whatever drives the node. `AsioTransport` will be the real node's `Env::send`.
+
 ### 1.2 Virtual time: a discrete-event loop, not a clock you sleep on
 
 The simulator is a single priority queue of `(time, seq, event)`. `seq` is a
@@ -385,16 +390,25 @@ That log is both the determinism check and the first debugging tool you reach fo
 ```cpp
 struct Faults {
     double drop_rate = 0.0;
-    std::chrono::milliseconds delay_min{0}, delay_max{0};
-    bool reorder = false;
-    std::vector<std::vector<int>> partitions;  // {{1,2},{3}} isolates node 3
-    std::set<int> paused;                      // node processes nothing
+    Duration delay_min{1ms}, delay_max{1ms};
+    bool reorder = false;                          // false: every link is FIFO
+    std::vector<std::vector<NodeId>> partitions;   // {{1,2},{3}} isolates node 3;
+                                                   // a node in no group is isolated
 };
 ```
 
-Plus two node-level faults on `Sim` itself: **crash** (drop the node's in-memory state and
-pending timers, and keep only what `SimStorage` had synced, per §3.4) and **restart**
-(rebuild the node from that storage).
+Partitions are checked when a message is sent **and** when it arrives, so cutting a link
+also drops what is in flight on it.
+
+Plus node-level faults on `Sim` itself:
+
+- **crash**: drop the node's in-memory state and pending timers, and keep only what
+  `SimStorage` had synced (§3.4), or a random in-order prefix of the unsynced writes;
+- **restart**: rebuild the node from that storage and call `on_start()`;
+- **pause / resume**: the node processes nothing, like a `SIGSTOP`ped process. Messages and
+  timers that arrive meanwhile are handled in arrival order on resume, not dropped.
+
+Every seeded test honours `RAFTKV_SEED=N`, which reruns only that seed.
 
 **Done when:**
 

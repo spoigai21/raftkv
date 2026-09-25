@@ -23,6 +23,8 @@ target_compile_options(raftkv_warnings INTERFACE -Wall -Wextra -Wpedantic -Werro
 
 add_library(raftkv
     src/version.cpp
+    src/sim/sim.cpp
+    src/sim/sim_storage.cpp
 )
 target_include_directories(raftkv PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(raftkv
@@ -42,7 +44,11 @@ if(RAFTKV_BUILD_TESTS)
     find_package(GTest CONFIG REQUIRED)
     include(GoogleTest)
 
-    add_executable(raftkv_tests tests/smoke_test.cpp)
+    add_executable(raftkv_tests
+        tests/smoke_test.cpp
+        tests/sim_storage_test.cpp
+        tests/sim_test.cpp
+    )
     target_link_libraries(raftkv_tests PRIVATE raftkv raftkv_warnings GTest::gtest_main)
     gtest_discover_tests(raftkv_tests DISCOVERY_MODE PRE_TEST)
 endif()

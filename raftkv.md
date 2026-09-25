@@ -3,7 +3,7 @@
 What this project is, why it exists, and what counts as done.
 The step-by-step build is in `raftkv-implementation.md`.
 
-**Status:** Phase 0 (build skeleton, presets, CI). No Raft code yet.
+**Status:** Phase 1 (deterministic simulator). No Raft code yet.
 
 ---
 
