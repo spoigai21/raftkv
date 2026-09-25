@@ -4,7 +4,7 @@ A replicated key–value store in C++20, built on the Raft consensus algorithm.
 It runs as 3 or 5 processes on one machine, talking over real sockets, and keeps working when a minority of them crash.
 It is a learning project: one Raft group, no transactions or indexes, and it isn't built to be fast.
 
-> **Status:** planning only. Nothing is built yet.
+> **Status:** Phase 0 — build skeleton, presets and CI. No Raft code yet.
 
 ## What it will do
 
@@ -26,6 +26,18 @@ It is a learning project: one Raft group, no transactions or indexes, and it isn
 ## Stack
 
 C++20 · CMake + Ninja · vcpkg · standalone Asio · Protocol Buffers · GoogleTest · Google Benchmark · GitHub Actions
+
+## Building
+
+Needs CMake ≥ 3.25, Ninja, a C++20 compiler and [vcpkg](https://github.com/microsoft/vcpkg) with `VCPKG_ROOT` set.
+
+```sh
+cmake --preset dev          # Debug + ASan/UBSan; also: tsan, rel
+cmake --build --preset dev
+ctest --preset dev
+```
+
+The first configure builds all dependencies through vcpkg, which takes a few minutes.
 
 ## Out of scope for v1
 

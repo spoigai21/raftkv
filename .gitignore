@@ -1,0 +1,12 @@
+build/
+vcpkg_installed/
+*.profraw
+*.profdata
+.DS_Store
+.vscode/
+.idea/
+compile_commands.json
+# fuzz corpora live in tests/fuzz/corpus; anything libFuzzer writes elsewhere is scratch
+crash-*
+leak-*
+timeout-*

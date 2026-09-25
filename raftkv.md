@@ -3,7 +3,7 @@
 What this project is, why it exists, and what counts as done.
 The step-by-step build is in `raftkv-implementation.md`.
 
-**Status:** plan only. Nothing is built yet.
+**Status:** Phase 0 (build skeleton, presets, CI). No Raft code yet.
 
 ---
 
@@ -99,7 +99,7 @@ Detail in `raftkv-implementation.md`; each phase has a done-when gate.
 
 | Phase | Output |
 |---|---|
-| 0 | Repo, CMake presets, vcpkg, CI with sanitizers on an empty repo |
+| 0 | Repo, CMake presets, pinned vcpkg, CI with sanitizers and a determinism lint, one smoke test |
 | 1 | **Deterministic simulator first** — virtual clock, seeded network, fault knobs |
 | 2 | Leader election |
 | 3 | Log replication and the commit rule |
@@ -133,7 +133,9 @@ Prediction 5 is the interesting one: if it is wrong, that is a result worth repo
 |---|---|
 | Raft's edge cases eat weeks | Follow Figure 2 literally; build the simulator first so bugs replay from a seed |
 | C++ tooling drag (vcpkg, CMake) | Phase 0 exists solely to get this working before any logic is written |
-| Debugging concurrency by print statement | Deterministic simulation + TSan; never `steady_clock::now()` in Raft code |
+| macOS toolchain differs from Linux CI | Apple clang has no libFuzzer, so fuzzing runs in CI or with Homebrew `llvm`; `jthread` needs the macOS 26 SDK; a golden event-log test catches seed replays that differ between libc++ and libstdc++ |
+| Debugging concurrency by print statement | Single-threaded Raft core driven by a deterministic event loop, plus TSan on the real node; never `steady_clock::now()` or `std::` random distributions in Raft code |
+| A design choice forces a rewrite at Phase 4 or 8 | Threading model, injected `Env`, storage interface and index conventions are fixed up front (implementation guide §3) |
 | Silent correctness bugs | The linearizability checker is the backstop; unit tests alone will not find these |
 | Scope creep into sharding/membership | Explicitly deferred in §5; v1 ends at one Raft group |
 | It never gets finished | Phase 7 is the honest stopping point — ship the write-up there if time runs out |
@@ -149,9 +151,10 @@ Prediction 5 is the interesting one: if it is wrong, that is a result worth repo
 | standalone Asio | Boost Software License |
 | Protocol Buffers | BSD |
 | GoogleTest / Google Benchmark | BSD / Apache 2.0 |
-| nlohmann/json, spdlog | MIT |
+| nlohmann/json | MIT |
 | ASan / UBSan / TSan / libFuzzer | part of clang, free |
-| Porcupine (linearizability checker) | MIT |
+| Porcupine (linearizability checker) + Go toolchain to run it | MIT / BSD |
+| tl::expected | CC0 |
 | GitHub Actions | free tier covers public repos |
 | The "cluster" | 3–5 processes on your own machine |
 

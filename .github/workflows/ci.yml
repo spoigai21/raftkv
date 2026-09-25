@@ -1,0 +1,78 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Determinism lint (implementation guide §3.2)
+        run: tools/check_determinism.sh
+      # Go is needed for tools/lincheck from Phase 6; installed now so CI setup does not change later.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+      - run: go version
+
+  build:
+    name: ${{ matrix.preset }} / ${{ matrix.compiler.cc }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [dev, tsan, rel]
+        compiler:
+          - { cc: gcc-13, cxx: g++-13 }
+          - { cc: clang-17, cxx: clang++-17 }
+    env:
+      CC: ${{ matrix.compiler.cc }}
+      CXX: ${{ matrix.compiler.cxx }}
+      VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.vcpkg-cache,readwrite
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      # TSan on 6.x kernels fails with "unexpected memory mapping" at the default ASLR entropy.
+      - name: Lower mmap randomization for TSan
+        if: matrix.preset == 'tsan'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+
+      - name: Set up vcpkg at the manifest baseline
+        run: |
+          baseline=$(jq -r '."builtin-baseline"' vcpkg.json)
+          git clone https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"
+          git -C "$VCPKG_ROOT" checkout "$baseline"
+          "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+          mkdir -p .vcpkg-cache
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: .vcpkg-cache
+          key: vcpkg-${{ matrix.compiler.cc }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-${{ matrix.compiler.cc }}-
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}
+
+      - name: Benchmark smoke test
+        if: matrix.preset == 'rel'
+        run: ./build/rel/raftkv_bench --benchmark_min_time=0.01s
