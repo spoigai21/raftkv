@@ -65,6 +65,7 @@ if(RAFTKV_BUILD_TESTS)
         tests/sim_storage_test.cpp
         tests/sim_test.cpp
         tests/raft_election_test.cpp
+        tests/raft_replication_test.cpp
     )
     target_link_libraries(raftkv_tests PRIVATE raftkv raftkv_warnings GTest::gtest_main)
     gtest_discover_tests(raftkv_tests DISCOVERY_MODE PRE_TEST)

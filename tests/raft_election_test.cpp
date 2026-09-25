@@ -104,8 +104,8 @@ TEST(RaftElection, GoldenChaosRunMatchesAcrossPlatforms) {
     c.schedule_chaos(42, 5s);
     c.sim().start();
     c.sim().run_until(raft::Time{8s});
-    EXPECT_EQ(c.sim().event_log().size(), 2660u);
-    EXPECT_EQ(c.sim().log_hash(), 8155514256532082736ULL);
+    EXPECT_EQ(c.sim().event_log().size(), 2644u);
+    EXPECT_EQ(c.sim().log_hash(), 7430155566530532704ULL);
 }
 
 // ---- beyond the gate ---------------------------------------------------------------------

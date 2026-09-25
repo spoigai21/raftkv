@@ -56,6 +56,9 @@ struct Encoder {
         pb::AppendEntriesReply pb;
         pb.set_term(r.term);
         pb.set_success(r.success);
+        pb.set_match_index(r.match_index);
+        pb.set_conflict_index(r.conflict_index);
+        pb.set_conflict_term(r.conflict_term);
         return {.from = 0, .to = to, .method = std::string(kAppendEntriesReply), .payload = serialize(pb)};
     }
 };
@@ -101,7 +104,10 @@ tl::expected<Rpc, std::string> parse(const Message& m) {
     }
     if (m.method == kAppendEntriesReply) {
         return decode_pb<pb::AppendEntriesReply>(m).map([](const pb::AppendEntriesReply& pb) -> Rpc {
-            return AppendEntriesReply{.term = pb.term(), .success = pb.success()};
+            return AppendEntriesReply{.term = pb.term(), .success = pb.success(),
+                                      .match_index = pb.match_index(),
+                                      .conflict_index = pb.conflict_index(),
+                                      .conflict_term = pb.conflict_term()};
         });
     }
     return tl::unexpected(std::format("unknown method '{}'", m.method));
@@ -121,7 +127,9 @@ struct Describer {
                            r.prev_log_index, r.prev_log_term, r.entries.size(), r.leader_commit);
     }
     std::string operator()(const AppendEntriesReply& r) const {
-        return std::format("AppendEntriesReply term={} ok={}", r.term, r.success);
+        return r.success ? std::format("AppendEntriesReply term={} ok match={}", r.term, r.match_index)
+                         : std::format("AppendEntriesReply term={} fail conflict={}/{}", r.term,
+                                       r.conflict_index, r.conflict_term);
     }
 };
 

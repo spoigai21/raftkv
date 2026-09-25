@@ -36,6 +36,14 @@ struct AppendEntries {
 struct AppendEntriesReply {
     Term term = 0;
     bool success = false;
+    // On success, the follower's log matches the leader's up to here. Sent explicitly
+    // because replies can arrive out of order.
+    Index match_index = 0;
+    // On failure, a hint so the leader can skip back a whole term per round trip instead of
+    // one entry: the follower's conflicting term (0 if its log is just too short) and the
+    // first index it holds for that term (or its last index + 1).
+    Index conflict_index = 0;
+    Term conflict_term = 0;
 };
 
 using Rpc = std::variant<RequestVote, RequestVoteReply, AppendEntries, AppendEntriesReply>;

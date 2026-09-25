@@ -490,6 +490,30 @@ slow, and with Phase 8's large logs it is unusable.
 **Done when:** 100 entries proposed at the leader appear in identical order on all nodes,
 and a follower partitioned for 50 entries catches up fully on rejoin.
 
+*As built* (`src/raft/raft.cpp`):
+
+- `propose()` on the leader appends and syncs, then replicates. Followers sync before
+  acking. So Phase 4's "durable before replying" rule already holds against `SimStorage`,
+  and a planted missing `sync()` is caught by the crash tests.
+- Replies carry `match_index` explicitly, since they can arrive out of order, plus the
+  `conflict_index`/`conflict_term` hint on failure. A stale reply can never move
+  `match_index` back or `next_index` below it.
+- A follower only truncates at a real conflict, so a delayed, shorter `AppendEntries`
+  cannot delete entries that a newer one delivered.
+- A new leader appends a **no-op** from its own term (paper §8). Earlier-term entries then
+  commit without waiting for a client, and Phase 5's reads will need it anyway.
+- Applying runs in its own zero-delay timer event, never inline, one entry at a time in
+  order. `last_applied` is volatile, so a restarted node replays from index 1 until Phase 8
+  adds snapshots.
+- The harness now also checks **State Machine Safety**, **Leader Completeness**, "a
+  committed index never changes" and in-order exactly-once apply after every event. Chaos
+  runs with a client proposing every 20 ms, then requires every node to converge on one
+  log after healing.
+- Planted bugs (the §5.4.2 commit rule, no sync, trusting `leader_commit` past the last new
+  entry, truncating matching entries, skipping the consistency check, no leader no-op) are
+  all caught. The §5.4.2 bug is caught **only** by its hand-driven test: 400 chaos runs
+  never produced the Figure 8 schedule, which is why that test exists.
+
 ---
 
 ## Phase 4 — Persistence and crash recovery

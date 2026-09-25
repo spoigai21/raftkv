@@ -1,7 +1,8 @@
 #pragma once
 
-// Test harness: a simulated cluster of Raft nodes whose safety invariants are checked after
-// every single event, plus a seeded fault script for chaos runs.
+// Test harness: a simulated cluster of Raft nodes whose safety invariants (Figure 3 of the
+// paper) are checked after every single event, plus a seeded fault script and a client
+// workload for chaos runs.
 
 #include <algorithm>
 #include <cstdio>
@@ -10,6 +11,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -24,7 +26,9 @@ using namespace std::chrono_literals;
 
 class RaftCluster {
 public:
-    RaftCluster(std::uint64_t seed, int n) : ids_(make_ids(n)), sim_(seed, ids_, factory(ids_)) {
+    RaftCluster(std::uint64_t seed, int n)
+        : ids_(make_ids(n)),
+          sim_(seed, ids_, [this](raft::NodeId me, raft::Env& env) { return make_node(me, env); }) {
         sim_.describe_messages_with(raft::describe);
         sim_.after_each_event([this] { check_invariants(); });
         sim_.faults().delay_min = 1ms;
@@ -63,6 +67,58 @@ public:
 
     bool wait_for_leader(raft::Duration timeout) {
         return sim_.run_until([this] { return leader().has_value(); }, sim_.now() + timeout);
+    }
+
+    // Proposes to the current leader, if there is one.
+    std::optional<raft::ProposeResult> propose(std::string command) {
+        auto id = leader();
+        if (!id) return std::nullopt;
+        return raft(*id)->propose(std::move(command));
+    }
+
+    // Commands applied by node `id` since it last booted, in order, without leader no-ops.
+    std::vector<std::string> applied(raft::NodeId id) const {
+        std::vector<std::string> out;
+        for (const auto& e : applied_.at(id)) if (!e.command.empty()) out.push_back(e.command);
+        return out;
+    }
+
+    // Highest index any node has ever seen committed.
+    raft::Index max_committed() const { return committed_.empty() ? 0 : committed_.rbegin()->first; }
+
+    // Every node is up and holds the same log, all of it committed and applied.
+    bool converged() {
+        const raft::Raft* first = nullptr;
+        for (raft::NodeId id : ids_) {
+            const raft::Raft* r = live(id);
+            if (r == nullptr || r->commit_index() != r->last_log_index() ||
+                r->last_applied() != r->commit_index()) {
+                return false;
+            }
+            if (first == nullptr) {
+                first = r;
+                continue;
+            }
+            if (r->last_log_index() != first->last_log_index()) return false;
+            for (raft::Index i = 1; i <= r->last_log_index(); ++i) {
+                if (!(*r->entry_at(i) == *first->entry_at(i))) return false;
+            }
+        }
+        return true;
+    }
+
+    bool wait_for_convergence(raft::Duration timeout) {
+        return sim_.run_until([this] { return converged(); }, sim_.now() + timeout);
+    }
+
+    // A client that proposes "<prefix><n>" to whoever leads, every `every`, until `until`.
+    void schedule_workload(raft::Duration every, raft::Time until, std::string prefix = "c") {
+        auto n = std::make_shared<int>(0);
+        for (raft::Time t = sim_.now() + every; t < until; t = t + every) {
+            sim_.schedule(t, "propose", [this, n, prefix] {
+                if (propose(prefix + std::to_string(*n))) ++*n;
+            });
+        }
     }
 
     // Every live node agrees on who leads, in the same term.
@@ -147,12 +203,30 @@ private:
         return ids;
     }
 
-    static sim::Sim::NodeFactory factory(std::vector<raft::NodeId> ids) {
-        return [ids](raft::NodeId me, raft::Env& env) {
-            raft::RaftConfig cfg{.id = me, .peers = {}};
-            for (raft::NodeId p : ids) if (p != me) cfg.peers.push_back(p);
-            return std::make_unique<raft::Raft>(cfg, env);
-        };
+    // Called on every boot. The state machine (here, a list of applied entries) is volatile,
+    // so it starts empty and Raft replays the log into it.
+    std::unique_ptr<raft::Node> make_node(raft::NodeId me, raft::Env& env) {
+        raft::RaftConfig cfg{.id = me, .peers = {}};
+        for (raft::NodeId p : ids_) if (p != me) cfg.peers.push_back(p);
+        applied_[me].clear();
+        commit_checked_[me] = 0;
+        return std::make_unique<raft::Raft>(cfg, env, [this, me](const raft::LogEntry& e) {
+            on_apply(me, e);
+        });
+    }
+
+    void on_apply(raft::NodeId id, const raft::LogEntry& e) {
+        auto& mine = applied_[id];
+        if (e.index != mine.size() + 1) {
+            violation(std::format("node {} applied index {} after {}", id, e.index, mine.size()));
+        }
+        mine.push_back(e);
+        // State Machine Safety: nobody ever applies a different entry at the same index.
+        auto [it, fresh] = applied_at_.emplace(e.index, e);
+        if (!fresh && !(it->second == e)) {
+            violation(std::format("index {} applied as {}/'{}' and {}/'{}'", e.index, it->second.term,
+                                  it->second.command, e.term, e.command));
+        }
     }
 
     raft::Raft* live(raft::NodeId id) {
@@ -177,6 +251,34 @@ private:
             if (term < seen) violation(std::format("node {} term went back {} -> {}", id, seen, term));
             seen = std::max(seen, term);
 
+            // Committed entries never change: record each index once any node commits it, and
+            // every later commit of that index must be the same entry.
+            for (raft::Index i = commit_checked_[id] + 1; i <= r->commit_index(); ++i) {
+                const raft::LogEntry* e = r->entry_at(i);
+                if (e == nullptr) {
+                    violation(std::format("node {} committed {} past its log end", id, i));
+                    break;
+                }
+                auto [it, fresh] = committed_.emplace(i, *e);
+                if (!fresh && !(it->second == *e)) {
+                    violation(std::format("index {} committed as term {} and term {}", i,
+                                          it->second.term, e->term));
+                }
+            }
+            commit_checked_[id] = std::max(commit_checked_[id], r->commit_index());
+
+            // Leader Completeness: a leader holds every entry committed before its term.
+            if (r->role() == raft::Role::Leader && checked_leaders_.emplace(id, term).second) {
+                for (const auto& [i, e] : committed_) {
+                    const raft::LogEntry* mine = r->entry_at(i);
+                    if (mine == nullptr || !(*mine == e)) {
+                        violation(std::format("leader {} of term {} lacks committed index {}", id,
+                                              term, i));
+                        break;
+                    }
+                }
+            }
+
             // A node votes at most once per term, even across a crash.
             if (auto v = r->voted_for()) {
                 auto [it, fresh] = vote_in_term_.emplace(std::pair(id, term), *v);
@@ -199,6 +301,11 @@ private:
     std::map<raft::Term, raft::NodeId> leader_of_term_;
     std::map<raft::NodeId, raft::Term> highest_term_;
     std::map<std::pair<raft::NodeId, raft::Term>, raft::NodeId> vote_in_term_;
+    std::map<raft::Index, raft::LogEntry> committed_;
+    std::map<raft::NodeId, raft::Index> commit_checked_;
+    std::set<std::pair<raft::NodeId, raft::Term>> checked_leaders_;
+    std::map<raft::NodeId, std::vector<raft::LogEntry>> applied_;
+    std::map<raft::Index, raft::LogEntry> applied_at_;
     std::vector<std::string> violations_;
 };
 
