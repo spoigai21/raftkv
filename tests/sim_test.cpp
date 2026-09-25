@@ -182,14 +182,14 @@ TEST(SimNetwork, PartitionDropsAtSendAndInFlight) {
     auto& env1 = s.node_as<ProbeNode>(1).env();
 
     s.faults().partitions = {{1, 2}, {3}};
-    env1.send({.to = 3, .payload = "cut"});        // dropped at send
-    env1.send({.to = 2, .payload = "same-side"});  // delivered
+    env1.send({.to = 3, .method = "M", .payload = "cut"});        // dropped at send
+    env1.send({.to = 2, .method = "M", .payload = "same-side"});  // delivered
     s.faults().partitions.clear();
-    env1.send({.to = 3, .payload = "in-flight"});  // partitioned while in flight
+    env1.send({.to = 3, .method = "M", .payload = "in-flight"});  // partitioned while in flight
     s.faults().partitions = {{1, 2}, {3}};
     s.run_for(20ms);
     s.faults().partitions.clear();
-    env1.send({.to = 3, .payload = "healed"});
+    env1.send({.to = 3, .method = "M", .payload = "healed"});
     s.run_for(20ms);
 
     EXPECT_EQ(s.node_as<ProbeNode>(2).messages, std::vector<std::string>{"same-side"});
@@ -201,8 +201,8 @@ TEST(SimNetwork, UnlistedNodeIsIsolated) {
     Sim s(1, {1, 2, 3}, probes());
     s.start();
     s.faults().partitions = {{1, 2}};
-    s.node_as<ProbeNode>(1).env().send({.to = 3, .payload = "x"});
-    s.node_as<ProbeNode>(3).env().send({.to = 1, .payload = "y"});
+    s.node_as<ProbeNode>(1).env().send({.to = 3, .method = "M", .payload = "x"});
+    s.node_as<ProbeNode>(3).env().send({.to = 1, .method = "M", .payload = "y"});
     s.run_for(10ms);
     EXPECT_TRUE(s.node_as<ProbeNode>(3).messages.empty());
     EXPECT_TRUE(s.node_as<ProbeNode>(1).messages.empty());
@@ -211,7 +211,7 @@ TEST(SimNetwork, UnlistedNodeIsIsolated) {
 TEST(SimNetwork, SenderCannotBeForged) {
     Sim s(1, {1, 2}, probes());
     s.start();
-    s.node_as<ProbeNode>(1).env().send({.from = 99, .to = 2, .payload = "x"});
+    s.node_as<ProbeNode>(1).env().send({.from = 99, .to = 2, .method = "M", .payload = "x"});
     s.run_for(10ms);
     ASSERT_FALSE(s.event_log().empty());
     EXPECT_NE(s.log_tail(1).find("deliver 1->2"), std::string::npos) << s.log_tail(3);
@@ -274,9 +274,9 @@ TEST(SimFaults, PausedNodeHandlesEverythingOnResumeInArrivalOrder) {
     s.start();
     s.pause(2);
     s.node_as<ProbeNode>(2).env().after(5ms, 42);
-    s.node_as<ProbeNode>(1).env().send({.to = 2, .payload = "a"});
+    s.node_as<ProbeNode>(1).env().send({.to = 2, .method = "M", .payload = "a"});
     s.run_for(10ms);
-    s.node_as<ProbeNode>(1).env().send({.to = 2, .payload = "b"});
+    s.node_as<ProbeNode>(1).env().send({.to = 2, .method = "M", .payload = "b"});
     s.run_for(10ms);
     EXPECT_TRUE(s.node_as<ProbeNode>(2).messages.empty());
     EXPECT_TRUE(s.node_as<ProbeNode>(2).timers.empty());
@@ -291,7 +291,7 @@ TEST(SimFaults, CrashAfterResumeDoesNotDeliverToDeadNode) {
     Sim s(1, {1, 2}, probes());
     s.start();
     s.pause(2);
-    s.node_as<ProbeNode>(1).env().send({.to = 2, .payload = "a"});
+    s.node_as<ProbeNode>(1).env().send({.to = 2, .method = "M", .payload = "a"});
     s.run_for(10ms);
     s.resume(2);   // "a" is queued for now...
     s.crash(2);    // ...but the node dies first
@@ -304,7 +304,7 @@ TEST(SimFaults, MessagesToADownNodeAreDropped) {
     Sim s(1, {1, 2}, probes());
     s.start();
     s.crash(2);
-    s.node_as<ProbeNode>(1).env().send({.to = 2, .payload = "lost"});
+    s.node_as<ProbeNode>(1).env().send({.to = 2, .method = "M", .payload = "lost"});
     s.run_for(10ms);
     s.restart(2);
     s.run_for(10ms);
