@@ -25,7 +25,7 @@ target_compile_options(raftkv_warnings INTERFACE -Wall -Wextra -Wpedantic -Werro
 # SYSTEM so they never trip -Werror in the code that includes them.
 set(RAFTKV_PROTO_OUT ${CMAKE_CURRENT_BINARY_DIR}/proto)
 file(MAKE_DIRECTORY ${RAFTKV_PROTO_OUT})
-add_library(raftkv_proto STATIC src/raft/messages.proto src/kv/kv.proto)
+add_library(raftkv_proto STATIC src/raft/messages.proto src/kv/kv.proto src/net/net.proto)
 target_link_libraries(raftkv_proto PUBLIC protobuf::libprotobuf-lite)
 target_include_directories(raftkv_proto SYSTEM PUBLIC ${RAFTKV_PROTO_OUT})
 protobuf_generate(
@@ -41,6 +41,9 @@ add_library(raftkv
     src/kv/messages.cpp
     src/kv/server.cpp
     src/kv/state_machine.cpp
+    src/net/asio_env.cpp
+    src/net/cluster_config.cpp
+    src/net/frame.cpp
     src/raft/messages.cpp
     src/raft/raft.cpp
     src/sim/sim.cpp
@@ -50,8 +53,8 @@ add_library(raftkv
 )
 target_include_directories(raftkv PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(raftkv
-    PUBLIC tl::expected
-    PRIVATE raftkv_proto raftkv_warnings
+    PUBLIC tl::expected asio::asio
+    PRIVATE raftkv_proto raftkv_warnings nlohmann_json::nlohmann_json
 )
 target_compile_definitions(raftkv PRIVATE RAFTKV_VERSION="${PROJECT_VERSION}")
 
@@ -77,9 +80,16 @@ if(RAFTKV_BUILD_TESTS)
         tests/raft_persistence_test.cpp
         tests/kv_state_machine_test.cpp
         tests/kv_test.cpp
+        tests/net_test.cpp
     )
     target_link_libraries(raftkv_tests PRIVATE raftkv raftkv_warnings GTest::gtest_main)
     gtest_discover_tests(raftkv_tests DISCOVERY_MODE PRE_TEST)
+
+    # Real processes: three raftkvd and raftkvctl on localhost (tests/cluster/smoke.sh).
+    add_test(NAME cluster_smoke
+             COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/cluster/smoke.sh
+                     $<TARGET_FILE:raftkvd> $<TARGET_FILE:raftkvctl>)
+    set_tests_properties(cluster_smoke PROPERTIES TIMEOUT 180)
 endif()
 
 if(RAFTKV_FUZZ)

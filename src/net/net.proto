@@ -1,0 +1,14 @@
+// What travels inside one TCP frame: a raft::Message. The frame itself is
+// [len u32 little-endian][Envelope bytes].
+syntax = "proto3";
+
+package raftkv.net.pb;
+
+option optimize_for = LITE_RUNTIME;
+
+message Envelope {
+  uint32 from = 1;
+  uint32 to = 2;
+  string method = 3;
+  bytes payload = 4;
+}

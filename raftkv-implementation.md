@@ -654,6 +654,30 @@ that comparison is a good write-up section.
 `FileStorage` as separate processes. Phase 4's cluster-wide "`kill -9` every node" runs in
 the simulator until then. The real-process version belongs to Phase 7's process suite.
 
+*As built, part 2* (`src/net/`, `apps/`):
+
+- `AsioEnv` is the real-process `Env`, and the same `kv::Server`/`kv::Client` code runs on
+  it unchanged. **One thread per process:** Raft, the state machine and all socket I/O run
+  on the thread that runs the `io_context`. §3.1 allowed separate I/O and apply threads;
+  one thread is simpler and needs no locks at all. TSan still runs the process tests, but
+  there is little for it to find by design.
+- Frames: `[len u32][Envelope protobuf]`, with a length over 16 MiB rejected before
+  allocating. Connections carry frames both ways. Servers dial each other and back off
+  100 ms after a failed connect. A reply to a client goes back on the connection the request
+  came in on. An unreachable destination means the message is dropped, which Raft already
+  tolerates.
+- `raftkvd --id N --cluster FILE --data-dir DIR`: exits 1 and refuses to start on a damaged
+  data directory, exits 1 if a disk write fails, and exits 0 on SIGTERM.
+- `raftkvctl --cluster FILE [--verbose] get|put|append ...`: `--verbose` prints which server
+  answered, which is how scripts find the leader.
+- `tests/cluster/smoke.sh`, run by ctest under every preset:
+  - three real processes serve put/append/get;
+  - `kill -9` of the leader leaves a working cluster with nothing lost;
+  - `kill -9` of **every** node in the middle of a stream of appends, then a restart from
+    disk, keeps every acknowledged append exactly once and in order (its verifier was
+    checked against fabricated duplicate, lost and reordered results);
+  - a corrupted log makes the node refuse to start while the other two keep serving.
+
 ---
 
 ## Phase 6 — Prove it: linearizability checking

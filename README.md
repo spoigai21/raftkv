@@ -4,7 +4,7 @@ A replicated key–value store in C++20, built on the Raft consensus algorithm.
 It runs as 3 or 5 processes on one machine, talking over real sockets, and keeps working when a minority of them crash.
 It is a learning project: one Raft group, no transactions or indexes, and it isn't built to be fast.
 
-> **Status:** Phase 5, part 1 — the KV API with duplicate detection works in the simulator. No real server processes yet.
+> **Status:** Phase 5 — a working replicated KV store: real server processes, crash-safe storage, duplicate detection. Linearizability checking (Phase 6) is next.
 
 ## What it will do
 
@@ -38,6 +38,22 @@ ctest --preset dev
 ```
 
 The first configure builds all dependencies through vcpkg, which takes a few minutes.
+
+## Running a cluster
+
+```sh
+cat > cluster.json <<'JSON'
+{ "1": "127.0.0.1:7001", "2": "127.0.0.1:7002", "3": "127.0.0.1:7003" }
+JSON
+for i in 1 2 3; do ./build/rel/raftkvd --id $i --cluster cluster.json --data-dir data/$i & done
+
+./build/rel/raftkvctl --cluster cluster.json put greeting hello
+./build/rel/raftkvctl --cluster cluster.json append greeting ", world"
+./build/rel/raftkvctl --cluster cluster.json get greeting     # hello, world
+```
+
+Kill any one server with `kill -9` and the other two keep serving; restart it and it
+catches up from its data directory.
 
 ## Out of scope for v1
 

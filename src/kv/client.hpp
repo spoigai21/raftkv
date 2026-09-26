@@ -40,6 +40,8 @@ public:
 
     bool busy() const { return outstanding_.has_value(); }
     std::uint64_t client_id() const { return client_id_; }
+    // The server the next (or current) request goes to: after a success, the leader.
+    raft::NodeId current_server() const { return config_.servers[target_]; }
     const ClientStats& stats() const { return stats_; }
 
     void on_start() override {}
