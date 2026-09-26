@@ -20,6 +20,11 @@ find_package(tl-expected CONFIG REQUIRED)
 # Warnings apply to raftkv targets only: not to vcpkg ports, and not to generated protobuf code.
 add_library(raftkv_warnings INTERFACE)
 target_compile_options(raftkv_warnings INTERFACE -Wall -Wextra -Wpedantic -Werror)
+# GCC's TSan warns that it does not model std::atomic_thread_fence, which Asio uses
+# internally, and -Werror makes that fatal. Our processes are single-threaded (implementation
+# guide, Phase 5), so Asio's fences never synchronize anything TSan would need to see.
+# Clang has no such warning; GCC ignores this flag without -fsanitize=thread.
+target_compile_options(raftkv_warnings INTERFACE $<$<CXX_COMPILER_ID:GNU>:-Wno-tsan>)
 
 # Generated protobuf code: its own library, without raftkv_warnings, and its headers are
 # SYSTEM so they never trip -Werror in the code that includes them.
