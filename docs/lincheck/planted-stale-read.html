@@ -1,0 +1,1029 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Porcupine</title>
+    <style>
+      html {
+  font-family: Helvetica, Arial, sans-serif;
+  font-size: 16px;
+}
+
+text {
+  dominant-baseline: middle;
+}
+
+#legend {
+  position: fixed;
+  left: 10px;
+  top: 10px;
+  background-color: rgba(255, 255, 255, 0.5);
+  backdrop-filter: blur(3px);
+  padding: 5px 2px 1px 2px;
+  border-radius: 4px;
+}
+
+#canvas {
+  margin-top: 45px;
+}
+
+#calc {
+  width: 0;
+  height: 0;
+  visibility: hidden;
+}
+
+.bg {
+  fill: transparent;
+}
+
+.divider {
+  stroke: #ccc;
+  stroke-width: 1;
+}
+
+.history-rect {
+  stroke: #888;
+  stroke-width: 1;
+  fill: #42d1f5;
+}
+
+.client-annotation-rect {
+  stroke: #888;
+  stroke-width: 1;
+  fill: #e0e0e0;
+}
+
+.link {
+  fill: #206475;
+  cursor: pointer;
+}
+
+.selected {
+  stroke-width: 5;
+}
+
+.target-rect {
+  opacity: 0;
+}
+
+.history-text {
+  font-size: 0.9rem;
+  font-family:
+    Menlo,
+    Courier New,
+    monospace;
+}
+
+.hidden {
+  opacity: 0.2;
+}
+
+.hidden line {
+  opacity: 0.5; /* note: this is multiplicative */
+}
+
+.linearization {
+  stroke: rgba(0, 0, 0, 0.5);
+}
+
+.linearization-invalid {
+  stroke: rgba(255, 0, 0, 0.5);
+}
+
+.linearization-point {
+  stroke-width: 5;
+}
+
+.linearization-line {
+  stroke-width: 2;
+}
+
+.tooltip {
+  position: absolute;
+  display: none;
+  width: max-content;
+  max-width: 300px;
+  border: 1px solid #ccc;
+  background: white;
+  border-radius: 4px;
+  padding: 5px;
+  font-size: 0.8rem;
+}
+
+.inactive {
+  display: none;
+}
+
+    </style>
+  </head>
+  <body>
+    <div id="legend">
+      <svg xmlns="http://www.w3.org/2000/svg" width="660" height="20" viewBox="0 0 660 20">
+        <text x="0" y="10">Clients</text>
+        <line x1="50" y1="0" x2="70" y2="20" stroke="#000" stroke-width="1"></line>
+        <text x="70" y="10">Time</text>
+        <line x1="110" y1="10" x2="200" y2="10" stroke="#000" stroke-width="2"></line>
+        <polygon points="200,5 200,15, 210,10" fill="#000"></polygon>
+        <rect x="300" y="5" width="10" height="10" fill="rgba(0, 0, 0, 0.5)"></rect>
+        <text x="315" y="10">Valid LP</text>
+        <rect x="400" y="5" width="10" height="10" fill="rgba(255, 0, 0, 0.5)"></rect>
+        <text x="415" y="10">Invalid LP</text>
+        <text x="520" y="10" id="jump-link" class="link">[ jump to first error ]</text>
+      </svg>
+    </div>
+    <div id="canvas"></div>
+    <div id="calc"></div>
+    <script>
+      'use strict'
+
+const SVG_NS = 'http://www.w3.org/2000/svg'
+
+function svgnew(tag, attributes) {
+  const element = document.createElementNS(SVG_NS, tag)
+  svgattr(element, attributes)
+  return element
+}
+
+function svgattr(element, attributes) {
+  if (attributes) {
+    for (const k in attributes) {
+      if (Object.hasOwn(attributes, k)) {
+        element.setAttributeNS(null, k, attributes[k])
+      }
+    }
+  }
+}
+
+function svgattach(parent, child) {
+  // eslint-disable-next-line unicorn/prefer-dom-node-append
+  return parent.appendChild(child)
+}
+
+function svgadd(element, tag, attributes) {
+  return svgattach(element, svgnew(tag, attributes))
+}
+
+function newArray(n, function_) {
+  const array = Array.from({length: n})
+  for (let i = 0; i < n; i++) {
+    array[i] = function_(i)
+  }
+
+  return array
+}
+
+function arrayEq(a, b) {
+  if (a === b) {
+    return true
+  }
+
+  if (a === undefined || a === null || b === undefined || b === null) {
+    return false
+  }
+
+  if (a.length !== b.length) {
+    return false
+  }
+
+  for (const [i, element] of a.entries()) {
+    if (element !== b[i]) {
+      return false
+    }
+  }
+
+  return true
+}
+
+function formatCallReturn(callTime, returnTime) {
+  return '<br><br>Call: ' + callTime + '<br><br>Return: ' + returnTime
+}
+
+// eslint-disable-next-line no-unused-vars, complexity
+function render(data) {
+  const PADDING = 10
+  const BOX_HEIGHT = 30
+  const BOX_SPACE = 15
+  const EPSILON = 20
+  const LINE_BLEED = 5
+  const BOX_GAP = 20
+  const BOX_TEXT_PADDING = 10
+  const HISTORY_RECT_RADIUS = 4
+
+  const annotations = data.Annotations
+  const coreHistory = data.Partitions
+  // For simplicity, make annotations look like more history
+  const allData = [...coreHistory, {History: annotations}]
+
+  let maxClient = -1
+  for (const partition of allData) {
+    for (const element of partition.History) {
+      maxClient = Math.max(maxClient, element.ClientId)
+    }
+  }
+
+  // "real" clients, not including tags
+  const realClients = maxClient + 1
+  // We treat each unique annotation tag as another "client"
+  const tags = new Set()
+  for (const annot of annotations) {
+    const tag = annot.Tag
+    if (tag.length > 0) {
+      tags.add(tag)
+    }
+  }
+
+  // Add synthetic client numbers
+  const tag2ClientId = {}
+  // `tags` is a collection of strings, so we do want to sort lexicographically
+  // eslint-disable-next-line unicorn/require-array-sort-compare
+  const sortedTags = [...tags].toSorted()
+  for (const tag of sortedTags) {
+    maxClient += 1
+    tag2ClientId[tag] = maxClient
+  }
+
+  for (const annot of annotations) {
+    const tag = annot.Tag
+    if (tag.length > 0) {
+      annot.ClientId = tag2ClientId[tag]
+    }
+  }
+
+  // Total number of clients now includes these synthetic clients
+  const nClient = maxClient + 1
+
+  // Prepare some useful data to be used later:
+  // - Add a GID to each event
+  // - Create a mapping from GIDs back to events
+  // - Create a set of all timestamps
+  // - Create a set of all start timestamps
+  const allTimestamps = new Set()
+  const startTimestamps = new Set()
+  const endTimestamps = new Set()
+  let gid = 0
+  const byGid = {}
+  for (const partition of allData) {
+    for (const element of partition.History) {
+      allTimestamps.add(element.Start)
+      startTimestamps.add(element.Start)
+      endTimestamps.add(element.End)
+      allTimestamps.add(element.End)
+      // Give elements GIDs
+      element.Gid = gid
+      byGid[gid] = element
+      gid++
+    }
+  }
+
+  let sortedTimestamps = [...allTimestamps].toSorted((a, b) => a - b)
+
+  // If one event has the same end time as another's start time, that means that
+  // they are concurrent, and we need to display them with overlap. We do this
+  // by tweaking the events that share the end time, updating the time to
+  // end+epsilon, so we have overlap.
+  //
+  // We do not render a good visualization in the situation where a single
+  // client has two events where one has an end time that matches the other's
+  // start time.  There isn't an easy way to handle this, because these two
+  // operations are concurrent (see the comment in model.go for more details for
+  // why it must be this way), and we can't display them with overlap on the
+  // same row cleanly.
+  const epsilon = 16
+  // Coordinated with computeVisualizationData, which uses an incrementing
+  // counter multiplied by 100, so it's safe to adjust timestamps by += epsilon
+  // without it overlapping with another adjusted timestamp (2*16 < 100)
+  for (const [index, partition] of allData.entries()) {
+    if (index === allData.length - 1) {
+      continue // Last partition is the annotations
+    }
+
+    for (const element of partition.History) {
+      const end = element.End
+      if (startTimestamps.has(end)) {
+        element.End = end + epsilon
+        allTimestamps.add(element.End)
+      }
+    }
+  }
+
+  // Handle display of (1) annotations where one has the same end time as
+  // another's start time, and (2) point-in-time annotations, on the same row.
+  //
+  // Unlike operations, where we interpret the start and end times as a closed
+  // interval (and where they have to be displayed with overlap, to be able to
+  // render linearizations and partial linearizations correctly), annotations
+  // are for display purposes only and we can interpret annotations with
+  // different start/end times as open intervals, and render two annotations
+  // with times (a, b) and (b, c) without overlap. We can also handle the
+  // situation where we have a point-in-time annotation with times (b, b).
+  //
+  // This code currently does not handle the case where we have two
+  // point-in-time annotations with the same tag at the same timestamp.
+  //
+  // We keep the annotation adjustment epsilon even smaller (dividing by 2), so
+  // adjusting an event's end time forward by epsilon doesn't overlap with an
+  // annotation's start time that's adjusted forwards (the adjustment of
+  // annotations goes in the opposite direction as that for events).
+  for (const element of allData.at(-1).History) {
+    if (element.End === element.Start) {
+      // Point-in-time annotation: we adjust these to have a non-zero-duration;
+      // we only need to edit the end timestamp, and we can leave the start
+      // as-is
+      element.End += epsilon / 4
+      allTimestamps.add(element.End)
+    } else {
+      // Annotation touching another event or annotation
+      if (startTimestamps.has(element.End)) {
+        element.End -= epsilon / 2
+        allTimestamps.add(element.End)
+      }
+
+      if (endTimestamps.has(element.Start)) {
+        element.Start += epsilon / 2
+        allTimestamps.add(element.Start)
+      }
+    }
+  }
+
+  // Update sortedTimestamps, because we created some new timestamps.
+  sortedTimestamps = [...allTimestamps].toSorted((a, b) => a - b)
+
+  // Compute layout.
+  //
+  // We warp time to make it easier to see what's going on. We can think
+  // of there being a monotonically increasing mapping from timestamps to
+  // x-positions. This mapping should satisfy some criteria to make the
+  // visualization interpretable:
+  //
+  // - distinguishability: there should be some minimum distance between
+  // unequal timestamps
+  // - visible text: history boxes should be wide enough to fit the text
+  // they contain
+  // - enough space for LPs: history boxes should be wide enough to fit
+  // all linearization points that go through them, while maintaining
+  // readability of linearizations (where each LP in a sequence is spaced
+  // some minimum distance away from the previous one)
+  //
+  // Originally, I thought about this as a linear program:
+  //
+  // - variables for every unique timestamp, x_i = warp(timestamp_i)
+  // - objective: minimize sum x_i
+  // - constraint: non-negative
+  // - constraint: ordering + distinguishability, timestamp_i < timestamp_j -> x_i + EPS < x_j
+  // - constraint: visible text, size_text_j < x_{timestamp_j_end} - x_{timestamp_j_start}
+  // - constraint: linearization lines have points that fit within box, ...
+  //
+  // This used to actually be implemented using an LP solver (without the
+  // linearization point part, though that should be doable too), but
+  // then I realized it's possible to solve optimally using a greedy
+  // left-to-right scan in linear time.
+  //
+  // So that is what we do here. We optimally solve the above, and while
+  // doing so, also compute some useful information (e.g. x-positions of
+  // linearization points) that is useful later.
+  const xPos = {}
+  // Compute some information about history elements, sorted by end time;
+  // the most important information here is box width.
+  const byEnd = allData
+    .flatMap((partition) =>
+      partition.History.map((element) => {
+        // Compute width of the text inside the history element by actually
+        // drawing it (in a hidden div)
+        const scratch = document.querySelector('#calc')
+        scratch.innerHTML = ''
+        const svg = svgadd(scratch, 'svg')
+        const text = svgadd(svg, 'text', {
+          'text-anchor': 'middle',
+          class: 'history-text',
+        })
+        text.textContent = element.Description
+        const bbox = text.getBBox()
+        const width = bbox.width + 2 * BOX_TEXT_PADDING
+        return {
+          start: element.Start,
+          end: element.End,
+          width,
+          gid: element.Gid,
+        }
+      }),
+    )
+    .toSorted((a, b) => a.end - b.end)
+  // Some preprocessing for linearization points and illegal next
+  // linearizations. We need to figure out where exactly LPs end up
+  // as we go, so we can make sure event boxes are wide enough.
+  const eventToLinearizations = newArray(gid, () => []) // Event -> [{index, position}]
+  const eventIllegalLast = newArray(gid, () => []) // Event -> [index]
+  const allLinearizations = []
+  let lgid = 0
+  for (const partition of coreHistory) {
+    for (const lin of partition.PartialLinearizations) {
+      const globalized = [] // Linearization with global indexes instead of partition-local ones
+      const included = new Set() // For figuring out illegal next LPs
+      for (const [position, id] of lin.entries()) {
+        included.add(id.Index)
+        const eventGid = partition.History[id.Index].Gid
+        globalized.push(eventGid)
+        eventToLinearizations[eventGid].push({index: lgid, position})
+      }
+
+      allLinearizations.push(globalized)
+      let minEnd = Infinity
+      for (const [index, element] of partition.History.entries()) {
+        if (!included.has(index)) {
+          minEnd = Math.min(minEnd, element.End)
+        }
+      }
+
+      for (const [index, element] of partition.History.entries()) {
+        if (!included.has(index) && element.Start < minEnd) {
+          eventIllegalLast[element.Gid].push(lgid)
+        }
+      }
+
+      lgid++
+    }
+  }
+
+  const linearizationPositions = newArray(lgid, () => []) // [[xpos]]
+  // Okay, now we're ready to do the left-to-right scan.
+  // Solve timestamp -> xPos.
+  let eventIndex = 0
+  xPos[sortedTimestamps[0]] = 0 // Positions start at 0
+  for (let i = 1; i < sortedTimestamps.length; i++) {
+    // Left-to-right scan, finding minimum time we can use
+    const ts = sortedTimestamps[i]
+    // Ensure some gap from last timestamp
+    let pos = xPos[sortedTimestamps[i - 1]] + BOX_GAP
+    // Ensure that text fits in boxes
+    while (eventIndex < byEnd.length && byEnd[eventIndex].end <= ts) {
+      // Push our position as far as necessary to accommodate text in box
+      const event_ = byEnd[eventIndex]
+      const textEndPos = xPos[event_.start] + event_.width
+      pos = Math.max(pos, textEndPos)
+      // Ensure that LPs fit in box.
+      //
+      // When placing the end of an event, for all partial linearizations
+      // that include that event, for the prefix that comes before that event,
+      // all their start points must have been placed already, so we can figure
+      // out the minimum width that the box needs to be to accommodate the LP.
+      for (const li of [
+        ...eventToLinearizations[event_.gid],
+        ...eventIllegalLast[event_.gid].map((index) => ({
+          index,
+          position: allLinearizations[index].length - 1,
+        })),
+      ]) {
+        const {index, position} = li
+        for (let j = linearizationPositions[index].length; j <= position; j++) {
+          // Determine past points
+          const previous =
+            linearizationPositions[index].length > 0 ? linearizationPositions[index][j - 1] : null
+
+          const nextGid = allLinearizations[index][j]
+          const nextPos =
+            previous === null
+              ? xPos[byGid[nextGid].Start]
+              : Math.max(xPos[byGid[nextGid].Start], previous + EPSILON)
+
+          linearizationPositions[index].push(nextPos)
+        }
+
+        // This next line only really makes sense for the ones in
+        // eventToLinearizations, not the ones from eventIllegalLast,
+        // but it's safe to do it for all points, so we don't bother to
+        // distinguish.
+        pos = Math.max(pos, linearizationPositions[index][position])
+      }
+
+      // Ensure that illegal next LPs fit in box too
+      for (const li of eventIllegalLast[event_.gid]) {
+        const lin = linearizationPositions[li]
+        const previous = lin.at(-1)
+        pos = Math.max(pos, previous + EPSILON)
+      }
+
+      eventIndex++
+    }
+
+    xPos[ts] = pos
+  }
+
+  // Get maximum tag width
+  let maxTagWidth = 0
+  for (let i = 0; i < nClient; i++) {
+    const tag = i < realClients ? i.toString() : sortedTags[i - realClients]
+    const scratch = document.querySelector('#calc')
+    scratch.innerHTML = ''
+    const svg = svgadd(scratch, 'svg')
+    const text = svgadd(svg, 'text', {
+      'text-anchor': 'end',
+    })
+    text.textContent = tag
+    const bbox = text.getBBox()
+    const width = bbox.width + 2 * BOX_TEXT_PADDING
+    if (width > maxTagWidth) {
+      maxTagWidth = width
+    }
+  }
+
+  const t0x = PADDING + maxTagWidth // X-pos of line at t=0
+
+  // Solved, now draw UI.
+
+  let selected = false
+  let selectedIndex = [-1, -1]
+
+  const canvasHeight = 2 * PADDING + BOX_HEIGHT * nClient + BOX_SPACE * (nClient - 1)
+  const canvasWidth = 2 * PADDING + maxTagWidth + xPos[sortedTimestamps.at(-1)]
+  const svg = svgadd(document.querySelector('#canvas'), 'svg', {
+    height: canvasHeight,
+    width: canvasWidth,
+  })
+
+  // Draw background, etc.
+  const bg = svgadd(svg, 'g')
+  const bgRect = svgadd(bg, 'rect', {
+    height: canvasHeight,
+    width: canvasWidth,
+    x: 0,
+    y: 0,
+    class: 'bg',
+  })
+  bgRect.addEventListener('click', handleBgClick)
+  for (let i = 0; i < nClient; i++) {
+    const text = svgadd(bg, 'text', {
+      x: PADDING + maxTagWidth - BOX_TEXT_PADDING,
+      y: PADDING + BOX_HEIGHT / 2 + i * (BOX_HEIGHT + BOX_SPACE),
+      'text-anchor': 'end',
+    })
+    text.textContent = i < realClients ? i : sortedTags[i - realClients]
+  }
+
+  // Vertical line at t=0
+  svgadd(bg, 'line', {
+    x1: t0x,
+    y1: PADDING,
+    x2: t0x,
+    y2: canvasHeight - PADDING,
+    class: 'divider',
+  })
+  // Horizontal line dividing clients from annotation tags, but only if there are tags
+  if (tags.size > 0) {
+    const annotationLineY = PADDING + realClients * (BOX_HEIGHT + BOX_SPACE) - BOX_SPACE / 2
+    svgadd(bg, 'line', {
+      x1: PADDING,
+      y1: annotationLineY,
+      x2: t0x,
+      y2: annotationLineY,
+      class: 'divider',
+    })
+  }
+
+  // Draw history
+  const historyLayers = []
+  const historyRects = []
+  const targetRects = svgnew('g')
+  for (const [partitionIndex, partition] of allData.entries()) {
+    const l = svgadd(svg, 'g')
+    historyLayers.push(l)
+    const rects = []
+    for (const [elementIndex, element] of partition.History.entries()) {
+      const g = svgadd(l, 'g')
+      const rx = xPos[element.Start]
+      const width = xPos[element.End] - rx
+      const x = rx + t0x
+      const y = PADDING + element.ClientId * (BOX_HEIGHT + BOX_SPACE)
+      const rectClass = element.Annotation ? 'client-annotation-rect' : 'history-rect'
+      rects.push(
+        svgadd(g, 'rect', {
+          height: BOX_HEIGHT,
+          width,
+          x,
+          y,
+          rx: HISTORY_RECT_RADIUS,
+          ry: HISTORY_RECT_RADIUS,
+          class: rectClass,
+          style:
+            element.Annotation && element.BackgroundColor.length > 0
+              ? `fill: ${element.BackgroundColor};`
+              : '',
+        }),
+      )
+      const text = svgadd(g, 'text', {
+        x: x + width / 2,
+        y: y + BOX_HEIGHT / 2,
+        'text-anchor': 'middle',
+        class: 'history-text',
+        style:
+          element.Annotation && element.TextColor.length > 0 ? `fill: ${element.TextColor};` : '',
+      })
+      text.textContent = element.Description
+      // We don't add mouseTarget to g, but to targetRects, because we
+      // want to layer this on top of everything at the end; otherwise, the
+      // LPs and lines will be over the target, which will create holes
+      // where hover etc. won't work
+      const mouseTarget = svgadd(targetRects, 'rect', {
+        height: BOX_HEIGHT,
+        width,
+        x,
+        y,
+        class: 'target-rect',
+        'data-partition': partitionIndex,
+        'data-index': elementIndex,
+      })
+      mouseTarget.addEventListener('mouseover', handleMouseOver)
+      mouseTarget.addEventListener('mousemove', handleMouseMove)
+      mouseTarget.addEventListener('mouseout', handleMouseOut)
+      mouseTarget.addEventListener('click', handleClick)
+    }
+
+    historyRects.push(rects)
+  }
+
+  // Draw partial linearizations
+  const illegalLast = coreHistory.map((partition) =>
+    partition.PartialLinearizations.map(() => new Set()),
+  )
+  const largestIllegal = coreHistory.map(() => ({}))
+  const largestIllegalLength = coreHistory.map(() => ({}))
+  const partialLayers = []
+  const errorPoints = []
+  for (const [partitionIndex, partition] of coreHistory.entries()) {
+    const l = []
+    partialLayers.push(l)
+    for (const [linIndex, lin] of partition.PartialLinearizations.entries()) {
+      const g = svgadd(svg, 'g')
+      l.push(g)
+      let previousX = null
+      let previousY = null
+      let previousElement = null
+      const included = new Set()
+      for (const id of lin) {
+        const element = partition.History[id.Index]
+        const hereX = t0x + xPos[element.Start]
+        const x = previousX === null ? hereX : Math.max(hereX, previousX + EPSILON)
+        const y = PADDING + element.ClientId * (BOX_HEIGHT + BOX_SPACE) - LINE_BLEED
+        // Line from previous
+        if (previousElement !== null) {
+          svgadd(g, 'line', {
+            x1: previousX,
+            x2: x,
+            y1:
+              previousElement.ClientId >= element.ClientId
+                ? previousY
+                : previousY + BOX_HEIGHT + 2 * LINE_BLEED,
+            y2: previousElement.ClientId <= element.ClientId ? y : y + BOX_HEIGHT + 2 * LINE_BLEED,
+            class: 'linearization linearization-line',
+          })
+        }
+
+        // Current line
+        svgadd(g, 'line', {
+          x1: x,
+          x2: x,
+          y1: y,
+          y2: y + BOX_HEIGHT + 2 * LINE_BLEED,
+          class: 'linearization linearization-point',
+        })
+        previousX = x
+        previousY = y
+        previousElement = element
+        included.add(id.Index)
+      }
+
+      // Show possible but illegal next linearizations
+      // a history element is a possible next try
+      // if no other history element must be linearized earlier
+      // i.e. forall others, this.start < other.end
+      let minEnd = Infinity
+      for (const [index, element] of partition.History.entries()) {
+        if (!included.has(index)) {
+          minEnd = Math.min(minEnd, element.End)
+        }
+      }
+
+      for (const [index, element] of partition.History.entries()) {
+        if (!included.has(index) && element.Start < minEnd) {
+          const hereX = t0x + xPos[element.Start]
+          const x = previousX === null ? hereX : Math.max(hereX, previousX + EPSILON)
+          const y = PADDING + element.ClientId * (BOX_HEIGHT + BOX_SPACE) - LINE_BLEED
+          // Line from previous
+          svgadd(g, 'line', {
+            x1: previousX,
+            x2: x,
+            y1:
+              previousElement.ClientId >= element.ClientId
+                ? previousY
+                : previousY + BOX_HEIGHT + 2 * LINE_BLEED,
+            y2: previousElement.ClientId <= element.ClientId ? y : y + BOX_HEIGHT + 2 * LINE_BLEED,
+            class: 'linearization-invalid linearization-line',
+          })
+          // Current line
+          const point = svgadd(g, 'line', {
+            x1: x,
+            x2: x,
+            y1: y,
+            y2: y + BOX_HEIGHT + 2 * LINE_BLEED,
+            class: 'linearization-invalid linearization-point',
+          })
+          errorPoints.push({
+            x,
+            partition: partitionIndex,
+            index: lin.at(-1).Index, // NOTE not index
+            element: point,
+          })
+          illegalLast[partitionIndex][linIndex].add(index)
+          // eslint-disable-next-line max-depth
+          if (
+            !Object.hasOwn(largestIllegalLength[partitionIndex], index) ||
+            largestIllegalLength[partitionIndex][index] < lin.length
+          ) {
+            largestIllegalLength[partitionIndex][index] = lin.length
+            largestIllegal[partitionIndex][index] = linIndex
+          }
+        }
+      }
+    }
+  }
+
+  errorPoints.sort((a, b) => a.x - b.x)
+
+  // Attach targetRects
+  svgattach(svg, targetRects)
+
+  // Tooltip
+  // eslint-disable-next-line unicorn/prefer-dom-node-append
+  const tooltip = document.querySelector('#canvas').appendChild(document.createElement('div'))
+  tooltip.setAttribute('class', 'tooltip')
+
+  function handleMouseOver() {
+    if (selected) {
+      return
+    }
+
+    const partition = Number(this.dataset.partition)
+    const index = Number(this.dataset.index)
+    highlight(partition, index)
+    tooltip.style.display = 'block'
+  }
+
+  function linearizationIndex(partition, index) {
+    // Show this linearization
+    if (partition >= coreHistory.length) {
+      // Annotation
+      return null
+    }
+
+    if (Object.hasOwn(coreHistory[partition].Largest, index)) {
+      return coreHistory[partition].Largest[index]
+    }
+
+    if (Object.hasOwn(largestIllegal[partition], index)) {
+      return largestIllegal[partition][index]
+    }
+
+    return null
+  }
+
+  function highlight(partition, index) {
+    // Hide all but this partition
+    for (const [i, layer] of historyLayers.entries()) {
+      layer.classList.toggle('hidden', i !== partition)
+    }
+
+    // Hide all but the relevant linearization
+    for (const layer of partialLayers) {
+      for (const g of layer) {
+        g.classList.add('hidden')
+      }
+    }
+
+    // Show this linearization
+    const maxIndex = linearizationIndex(partition, index)
+    if (maxIndex !== null) {
+      partialLayers[partition][maxIndex].classList.remove('hidden')
+    }
+
+    updateJump()
+  }
+
+  let lastTooltip = [null, null, null, null, null]
+  function handleMouseMove(event_) {
+    // Keep tooltip static if selected
+    if (selected) {
+      return
+    }
+
+    const partition = Number(this.dataset.partition)
+    const index = Number(this.dataset.index)
+    const [sPartition, sIndex] = selectedIndex
+    const thisTooltip = [partition, index, selected, sPartition, sIndex]
+
+    if (!arrayEq(lastTooltip, thisTooltip)) {
+      // If selected, show info relevant to the selected linearization
+      const maxIndex = selected
+        ? linearizationIndex(sPartition, sIndex)
+        : linearizationIndex(partition, index)
+
+      const callTime = allData[partition].History[index].OriginalStart
+      const returnTime = allData[partition].History[index].OriginalEnd
+
+      let metadata = ''
+      if (partition < coreHistory.length) {
+        const m = allData[partition].History[index].Metadata
+        if (m !== '') {
+          metadata = m + '<br><br>'
+        }
+      }
+
+      if (partition >= coreHistory.length) {
+        // Annotation
+        const details = annotations[index].Details
+        tooltip.textContent = details.length === 0 ? '⟨no details⟩' : details
+      } else if (selected && sPartition !== partition) {
+        tooltip.innerHTML =
+          metadata + 'Not part of selected partition.' + formatCallReturn(callTime, returnTime)
+      } else if (maxIndex === null) {
+        tooltip.innerHTML =
+          metadata +
+          (selected
+            ? 'Selected element is not part of any partial linearization.'
+            : 'Not part of any partial linearization.') +
+          formatCallReturn(callTime, returnTime)
+      } else {
+        const lin = coreHistory[partition].PartialLinearizations[maxIndex]
+        let previous = null
+        let current = null
+        let found = false
+        for (const element of lin) {
+          previous = current
+          current = element
+          if (current.Index === index) {
+            found = true
+            break
+          }
+        }
+
+        let message = metadata
+
+        if (found) {
+          // Part of linearization
+          if (previous !== null) {
+            message +=
+              '<strong>Previous state:</strong><br>' + previous.StateDescription + '<br><br>'
+          }
+
+          message +=
+            '<strong>New state:</strong><br>' +
+            current.StateDescription +
+            formatCallReturn(callTime, returnTime)
+        } else if (illegalLast[partition][maxIndex].has(index)) {
+          // Illegal next one
+          message +=
+            '<strong>Previous state:</strong><br>' +
+            lin.at(-1).StateDescription +
+            '<br><br><strong>New state:</strong><br>&langle;invalid op&rangle;' +
+            formatCallReturn(callTime, returnTime)
+        } else {
+          // Not part of this one
+          message +=
+            "Not part of selected element's partial linearization." +
+            formatCallReturn(callTime, returnTime)
+        }
+
+        tooltip.innerHTML = message
+      }
+
+      lastTooltip = thisTooltip
+    }
+
+    // Make sure tooltip doesn't overflow off the right side of the screen
+    const maxX =
+      document.documentElement.scrollLeft +
+      document.documentElement.clientWidth -
+      PADDING -
+      tooltip.getBoundingClientRect().width
+    tooltip.style.left = Math.min(event_.pageX + 20, maxX) + 'px'
+    tooltip.style.top = event_.pageY + 20 + 'px'
+  }
+
+  function handleMouseOut() {
+    if (selected) {
+      return
+    }
+
+    resetHighlight()
+    tooltip.style.display = 'none'
+    lastTooltip = [null, null, null, null, null]
+  }
+
+  function resetHighlight() {
+    // Show all layers
+    for (const layer of historyLayers) {
+      layer.classList.remove('hidden')
+    }
+
+    // Show longest linearizations, which are first
+    for (const layers of partialLayers) {
+      for (const [i, l] of layers.entries()) {
+        l.classList.toggle('hidden', i !== 0)
+      }
+    }
+
+    updateJump()
+  }
+
+  // Store jump click handler so we can remove it before adding a new one
+  let jumpClickHandler = null
+
+  function updateJump() {
+    const jump = document.querySelector('#jump-link')
+    // Find first non-hidden point
+    // feels a little hacky, but it works
+    const point = errorPoints.find((pt) => !pt.element.parentElement.classList.contains('hidden'))
+
+    // Remove any existing event listener
+    if (jumpClickHandler) {
+      jump.removeEventListener('click', jumpClickHandler)
+      jumpClickHandler = null
+    }
+
+    if (point) {
+      jump.classList.remove('inactive')
+      jumpClickHandler = () => {
+        point.element.scrollIntoView({behavior: 'smooth', inline: 'center', block: 'center'})
+        if (!selected) {
+          select(point.partition, point.index)
+        }
+      }
+
+      jump.addEventListener('click', jumpClickHandler)
+    } else {
+      jump.classList.add('inactive')
+    }
+  }
+
+  function handleClick(event_) {
+    const partition = Number(this.dataset.partition)
+    const index = Number(this.dataset.index)
+    if (selected) {
+      const [sPartition, sIndex] = selectedIndex
+      if (partition === sPartition && index === sIndex) {
+        deselect()
+        // Note: we're still displaying the tooltip, but once the user's mouse moves, it'll get updated
+        return
+      }
+
+      historyRects[sPartition][sIndex].classList.remove('selected')
+    }
+
+    select(partition, index)
+
+    tooltip.style.display = 'block'
+    // Set static tooltip position when selecting
+    const maxX =
+      document.documentElement.scrollLeft +
+      document.documentElement.clientWidth -
+      PADDING -
+      tooltip.getBoundingClientRect().width
+    tooltip.style.left = Math.min(event_.pageX + 20, maxX) + 'px'
+    tooltip.style.top = event_.pageY + 20 + 'px'
+  }
+
+  function handleBgClick() {
+    deselect()
+
+    tooltip.style.display = 'none'
+    lastTooltip = [null, null, null, null, null]
+  }
+
+  function select(partition, index) {
+    selected = true
+    selectedIndex = [partition, index]
+    highlight(partition, index)
+    historyRects[partition][index].classList.add('selected')
+  }
+
+  function deselect() {
+    if (!selected) {
+      return
+    }
+
+    selected = false
+    resetHighlight()
+    const [partition, index] = selectedIndex
+    historyRects[partition][index].classList.remove('selected')
+  }
+
+  handleMouseOut() // Initialize, same as mouse out
+}
+
+
+      const data = {"Partitions":[{"History":[{"ClientId":3,"Start":0,"OriginalStart":"0","End":2700,"OriginalEnd":"702868","Description":"get(\"x\") -\u003e \"102.6;102.13;\"","Metadata":""},{"ClientId":1,"Start":600,"OriginalStart":"357060","End":700,"OriginalEnd":"382574","Description":"put(\"x\", \"102.6;\")","Metadata":""},{"ClientId":1,"Start":1300,"OriginalStart":"465534","End":1400,"OriginalEnd":"485675","Description":"append(\"x\", \"102.13;\")","Metadata":""},{"ClientId":1,"Start":2000,"OriginalStart":"600008","End":2100,"OriginalEnd":"614292","Description":"get(\"x\") -\u003e \"102.6;102.13;\"","Metadata":""},{"ClientId":1,"Start":2100,"OriginalStart":"614292","End":2200,"OriginalEnd":"629416","Description":"get(\"x\") -\u003e \"102.6;102.13;\"","Metadata":""},{"ClientId":1,"Start":2400,"OriginalStart":"677109","End":2500,"OriginalEnd":"685719","Description":"get(\"x\") -\u003e \"102.6;102.13;\"","Metadata":""},{"ClientId":1,"Start":2600,"OriginalStart":"697507","End":2800,"OriginalEnd":"718261","Description":"put(\"x\", \"102.26;\")","Metadata":""},{"ClientId":3,"Start":2700,"OriginalStart":"702868","End":2900,"OriginalEnd":"732538","Description":"append(\"x\", \"104.1;\")","Metadata":""},{"ClientId":1,"Start":3100,"OriginalStart":"755622","End":3600,"OriginalEnd":"784748","Description":"append(\"x\", \"102.29;\")","Metadata":""},{"ClientId":2,"Start":3500,"OriginalStart":"780035","End":3900,"OriginalEnd":"809736","Description":"put(\"x\", \"103.2;\")","Metadata":""},{"ClientId":3,"Start":4300,"OriginalStart":"815929","End":4800,"OriginalEnd":"853329","Description":"append(\"x\", \"104.6;\")","Metadata":""},{"ClientId":0,"Start":4700,"OriginalStart":"850988","End":5100,"OriginalEnd":"873908","Description":"append(\"x\", \"101.4;\")","Metadata":""},{"ClientId":3,"Start":4800,"OriginalStart":"853329","End":5200,"OriginalEnd":"883735","Description":"append(\"x\", \"104.7;\")","Metadata":""},{"ClientId":1,"Start":5000,"OriginalStart":"868596","End":5600,"OriginalEnd":"904823","Description":"put(\"x\", \"102.35;\")","Metadata":""},{"ClientId":2,"Start":5800,"OriginalStart":"915881","End":6000,"OriginalEnd":"929119","Description":"get(\"x\") -\u003e \"102.35;\"","Metadata":""},{"ClientId":0,"Start":5900,"OriginalStart":"926569","End":6300,"OriginalEnd":"950359","Description":"put(\"x\", \"101.7;\")","Metadata":""},{"ClientId":2,"Start":6000,"OriginalStart":"929119","End":6600,"OriginalEnd":"971767","Description":"put(\"x\", \"103.8;\")","Metadata":""},{"ClientId":1,"Start":6100,"OriginalStart":"931262","End":6400,"OriginalEnd":"960353","Description":"put(\"x\", \"102.37;\")","Metadata":""},{"ClientId":0,"Start":6300,"OriginalStart":"950359","End":6700,"OriginalEnd":"977391","Description":"append(\"x\", \"101.8;\")","Metadata":""},{"ClientId":3,"Start":6800,"OriginalStart":"980372","End":7100,"OriginalEnd":"990647","Description":"get(\"x\") -\u003e \"103.8;101.8;\"","Metadata":""},{"ClientId":1,"Start":6900,"OriginalStart":"988799","End":7300,"OriginalEnd":"999406","Description":"get(\"x\") -\u003e \"103.8;101.8;\"","Metadata":""},{"ClientId":2,"Start":7000,"OriginalStart":"988889","End":7700,"OriginalEnd":"1016457","Description":"append(\"x\", \"103.10;\")","Metadata":""},{"ClientId":1,"Start":7300,"OriginalStart":"999406","End":8000,"OriginalEnd":"1025324","Description":"append(\"x\", \"102.40;\")","Metadata":""},{"ClientId":3,"Start":7500,"OriginalStart":"1008684","End":7800,"OriginalEnd":"1019636","Description":"get(\"x\") -\u003e \"103.8;101.8;103.10;\"","Metadata":""},{"ClientId":2,"Start":7700,"OriginalStart":"1016457","End":7900,"OriginalEnd":"1020265","Description":"get(\"x\") -\u003e \"103.8;101.8;103.10;\"","Metadata":""},{"ClientId":3,"Start":7800,"OriginalStart":"1019636","End":8500,"OriginalEnd":"1040705","Description":"put(\"x\", \"104.17;\")","Metadata":""},{"ClientId":2,"Start":8200,"OriginalStart":"1031281","End":8700,"OriginalEnd":"1059434","Description":"append(\"x\", \"103.13;\")","Metadata":""},{"ClientId":3,"Start":8500,"OriginalStart":"1040705","End":8800,"OriginalEnd":"1064712","Description":"append(\"x\", \"104.18;\")","Metadata":""},{"ClientId":0,"Start":8600,"OriginalStart":"1049368","End":9100,"OriginalEnd":"1084699","Description":"append(\"x\", \"101.14;\")","Metadata":""},{"ClientId":2,"Start":8700,"OriginalStart":"1059434","End":9000,"OriginalEnd":"1075778","Description":"get(\"x\") -\u003e \"104.17;103.13;104.18;\"","Metadata":""},{"ClientId":1,"Start":8900,"OriginalStart":"1067251","End":9400,"OriginalEnd":"1095392","Description":"append(\"x\", \"102.43;\")","Metadata":""},{"ClientId":0,"Start":9100,"OriginalStart":"1084699","End":9600,"OriginalEnd":"1109755","Description":"append(\"x\", \"101.15;\")","Metadata":""},{"ClientId":2,"Start":9200,"OriginalStart":"1087115","End":9700,"OriginalEnd":"1114738","Description":"append(\"x\", \"103.16;\")","Metadata":""},{"ClientId":1,"Start":9400,"OriginalStart":"1095392","End":9900,"OriginalEnd":"1128582","Description":"append(\"x\", \"102.44;\")","Metadata":""},{"ClientId":0,"Start":9600,"OriginalStart":"1109755","End":10200,"OriginalEnd":"1135927","Description":"put(\"x\", \"101.16;\")","Metadata":""},{"ClientId":2,"Start":9700,"OriginalStart":"1114738","End":10000,"OriginalEnd":"1131608","Description":"append(\"x\", \"103.17;\")","Metadata":""},{"ClientId":1,"Start":9900,"OriginalStart":"1128582","End":10300,"OriginalEnd":"1136656","Description":"get(\"x\") -\u003e \"101.16;103.17;\"","Metadata":""},{"ClientId":0,"Start":10200,"OriginalStart":"1135927","End":10800,"OriginalEnd":"1163687","Description":"append(\"x\", \"101.17;\")","Metadata":""},{"ClientId":1,"Start":10300,"OriginalStart":"1136656","End":10600,"OriginalEnd":"1154668","Description":"append(\"x\", \"102.46;\")","Metadata":""},{"ClientId":2,"Start":10400,"OriginalStart":"1143413","End":10500,"OriginalEnd":"1152787","Description":"get(\"x\") -\u003e \"101.16;103.17;\"","Metadata":""},{"ClientId":1,"Start":10600,"OriginalStart":"1154668","End":11100,"OriginalEnd":"1185867","Description":"put(\"x\", \"102.47;\")","Metadata":""},{"ClientId":0,"Start":11500,"OriginalStart":"1196102","End":11900,"OriginalEnd":"1219941","Description":"put(\"x\", \"101.20;\")","Metadata":""},{"ClientId":3,"Start":11800,"OriginalStart":"1215360","End":12300,"OriginalEnd":"4780372","Description":"put(\"x\", \"104.27;\")","Metadata":""},{"ClientId":0,"Start":11900,"OriginalStart":"1219941","End":12100,"OriginalEnd":"1233487","Description":"get(\"x\") -\u003e \"101.20;\"","Metadata":""},{"ClientId":0,"Start":12100,"OriginalStart":"1233487","End":12200,"OriginalEnd":"4775640","Description":"put(\"x\", \"101.22;\")","Metadata":""},{"ClientId":0,"Start":12200,"OriginalStart":"4775640","End":12400,"OriginalEnd":"4783327","Description":"get(\"x\") -\u003e \"101.22;\"","Metadata":""},{"ClientId":0,"Start":12400,"OriginalStart":"4783327","End":13000,"OriginalEnd":"4806799","Description":"put(\"x\", \"101.24;\")","Metadata":""},{"ClientId":2,"Start":12500,"OriginalStart":"4784204","End":12600,"OriginalEnd":"4795249","Description":"get(\"x\") -\u003e \"101.22;\"","Metadata":""},{"ClientId":3,"Start":12900,"OriginalStart":"4805484","End":13700,"OriginalEnd":"5328543","Description":"get(\"x\") -\u003e \"102.52;\"","Metadata":""},{"ClientId":2,"Start":13100,"OriginalStart":"4810540","End":13300,"OriginalEnd":"4824546","Description":"get(\"x\") -\u003e \"101.24;\"","Metadata":""},{"ClientId":1,"Start":13200,"OriginalStart":"4811748","End":13500,"OriginalEnd":"4846840","Description":"put(\"x\", \"102.52;\")","Metadata":""},{"ClientId":2,"Start":13300,"OriginalStart":"4824546","End":14100,"OriginalEnd":"5380022","Description":"append(\"x\", \"103.28;\")","Metadata":""},{"ClientId":1,"Start":13600,"OriginalStart":"4856923","End":14000,"OriginalEnd":"5374706","Description":"get(\"x\") -\u003e \"102.52;\"","Metadata":""},{"ClientId":3,"Start":13900,"OriginalStart":"5369726","End":18100,"OriginalEnd":"7898744","Description":"append(\"x\", \"104.32;\") -\u003e ?","Metadata":""},{"ClientId":1,"Start":14000,"OriginalStart":"5374706","End":14400,"OriginalEnd":"5401436","Description":"put(\"x\", \"102.55;\")","Metadata":""},{"ClientId":2,"Start":14100,"OriginalStart":"5380022","End":14700,"OriginalEnd":"5418088","Description":"append(\"x\", \"103.29;\")","Metadata":""},{"ClientId":0,"Start":14200,"OriginalStart":"5384481","End":14300,"OriginalEnd":"5399439","Description":"get(\"x\") -\u003e \"102.52;103.28;\"","Metadata":""},{"ClientId":0,"Start":14800,"OriginalStart":"5422363","End":18100,"OriginalEnd":"7898744","Description":"put(\"x\", \"101.31;\") -\u003e ?","Metadata":""},{"ClientId":1,"Start":15300,"OriginalStart":"5464660","End":15400,"OriginalEnd":"5482819","Description":"append(\"x\", \"102.59;\")","Metadata":""},{"ClientId":1,"Start":15700,"OriginalStart":"5527113","End":15800,"OriginalEnd":"5581238","Description":"put(\"x\", \"102.63;\")","Metadata":""},{"ClientId":2,"Start":16800,"OriginalStart":"7512093","End":16900,"OriginalEnd":"7616495","Description":"put(\"x\", \"103.35;\")","Metadata":""},{"ClientId":1,"Start":17400,"OriginalStart":"7707769","End":17600,"OriginalEnd":"7735087","Description":"put(\"x\", \"102.73;\")","Metadata":""}],"PartialLinearizations":[[{"Index":1,"StateDescription":"\"102.6;\""},{"Index":2,"StateDescription":"\"102.6;102.13;\""},{"Index":0,"StateDescription":"\"102.6;102.13;\""},{"Index":3,"StateDescription":"\"102.6;102.13;\""},{"Index":4,"StateDescription":"\"102.6;102.13;\""},{"Index":5,"StateDescription":"\"102.6;102.13;\""},{"Index":6,"StateDescription":"\"102.26;\""},{"Index":7,"StateDescription":"\"102.26;104.1;\""},{"Index":8,"StateDescription":"\"102.26;104.1;102.29;\""},{"Index":9,"StateDescription":"\"103.2;\""},{"Index":10,"StateDescription":"\"103.2;104.6;\""},{"Index":11,"StateDescription":"\"103.2;104.6;101.4;\""},{"Index":12,"StateDescription":"\"103.2;104.6;101.4;104.7;\""},{"Index":13,"StateDescription":"\"102.35;\""},{"Index":14,"StateDescription":"\"102.35;\""},{"Index":15,"StateDescription":"\"101.7;\""},{"Index":17,"StateDescription":"\"102.37;\""},{"Index":16,"StateDescription":"\"103.8;\""},{"Index":18,"StateDescription":"\"103.8;101.8;\""},{"Index":19,"StateDescription":"\"103.8;101.8;\""},{"Index":20,"StateDescription":"\"103.8;101.8;\""},{"Index":21,"StateDescription":"\"103.8;101.8;103.10;\""},{"Index":23,"StateDescription":"\"103.8;101.8;103.10;\""},{"Index":24,"StateDescription":"\"103.8;101.8;103.10;\""},{"Index":22,"StateDescription":"\"103.8;101.8;103.10;102.40;\""},{"Index":25,"StateDescription":"\"104.17;\""},{"Index":26,"StateDescription":"\"104.17;103.13;\""},{"Index":27,"StateDescription":"\"104.17;103.13;104.18;\""},{"Index":29,"StateDescription":"\"104.17;103.13;104.18;\""},{"Index":28,"StateDescription":"\"104.17;103.13;104.18;101.14;\""},{"Index":30,"StateDescription":"\"104.17;103.13;104.18;101.14;102.43;\""},{"Index":31,"StateDescription":"\"104.17;103.13;104.18;101.14;102.43;101.15;\""},{"Index":32,"StateDescription":"\"104.17;103.13;104.18;101.14;102.43;101.15;103.16;\""},{"Index":33,"StateDescription":"\"104.17;103.13;104.18;101.14;102.43;101.15;103.16;102.44;\""},{"Index":34,"StateDescription":"\"101.16;\""},{"Index":35,"StateDescription":"\"101.16;103.17;\""},{"Index":36,"StateDescription":"\"101.16;103.17;\""},{"Index":39,"StateDescription":"\"101.16;103.17;\""},{"Index":37,"StateDescription":"\"101.16;103.17;101.17;\""},{"Index":38,"StateDescription":"\"101.16;103.17;101.17;102.46;\""},{"Index":40,"StateDescription":"\"102.47;\""},{"Index":41,"StateDescription":"\"101.20;\""},{"Index":43,"StateDescription":"\"101.20;\""},{"Index":42,"StateDescription":"\"104.27;\""},{"Index":44,"StateDescription":"\"101.22;\""},{"Index":45,"StateDescription":"\"101.22;\""},{"Index":47,"StateDescription":"\"101.22;\""},{"Index":46,"StateDescription":"\"101.24;\""},{"Index":49,"StateDescription":"\"101.24;\""},{"Index":50,"StateDescription":"\"102.52;\""},{"Index":48,"StateDescription":"\"102.52;\""},{"Index":52,"StateDescription":"\"102.52;\""},{"Index":51,"StateDescription":"\"102.52;103.28;\""},{"Index":56,"StateDescription":"\"102.52;103.28;\""},{"Index":53,"StateDescription":"\"102.52;103.28;104.32;\""},{"Index":54,"StateDescription":"\"102.55;\""},{"Index":55,"StateDescription":"\"102.55;103.29;\""},{"Index":57,"StateDescription":"\"101.31;\""},{"Index":58,"StateDescription":"\"101.31;102.59;\""},{"Index":59,"StateDescription":"\"102.63;\""},{"Index":60,"StateDescription":"\"103.35;\""},{"Index":61,"StateDescription":"\"102.73;\""}]],"Largest":{"0":0,"1":0,"10":0,"11":0,"12":0,"13":0,"14":0,"15":0,"16":0,"17":0,"18":0,"19":0,"2":0,"20":0,"21":0,"22":0,"23":0,"24":0,"25":0,"26":0,"27":0,"28":0,"29":0,"3":0,"30":0,"31":0,"32":0,"33":0,"34":0,"35":0,"36":0,"37":0,"38":0,"39":0,"4":0,"40":0,"41":0,"42":0,"43":0,"44":0,"45":0,"46":0,"47":0,"48":0,"49":0,"5":0,"50":0,"51":0,"52":0,"53":0,"54":0,"55":0,"56":0,"57":0,"58":0,"59":0,"6":0,"60":0,"61":0,"7":0,"8":0,"9":0}},{"History":[{"ClientId":0,"Start":0,"OriginalStart":"0","End":3400,"OriginalEnd":"773161","Description":"put(\"y\", \"101.0;\")","Metadata":""},{"ClientId":1,"Start":0,"OriginalStart":"0","End":100,"OriginalEnd":"271157","Description":"get(\"y\") -\u003e not found","Metadata":""},{"ClientId":2,"Start":0,"OriginalStart":"0","End":3200,"OriginalEnd":"757272","Description":"get(\"y\") -\u003e \"102.23;102.27;\"","Metadata":""},{"ClientId":1,"Start":400,"OriginalStart":"315418","End":500,"OriginalEnd":"337973","Description":"put(\"y\", \"102.4;\")","Metadata":""},{"ClientId":1,"Start":500,"OriginalStart":"337973","End":600,"OriginalEnd":"357060","Description":"put(\"y\", \"102.5;\")","Metadata":""},{"ClientId":1,"Start":700,"OriginalStart":"382574","End":800,"OriginalEnd":"405847","Description":"append(\"y\", \"102.7;\")","Metadata":""},{"ClientId":1,"Start":900,"OriginalStart":"413828","End":1000,"OriginalEnd":"422627","Description":"get(\"y\") -\u003e \"102.5;102.7;\"","Metadata":""},{"ClientId":1,"Start":1200,"OriginalStart":"447235","End":1300,"OriginalEnd":"465534","Description":"put(\"y\", \"102.12;\")","Metadata":""},{"ClientId":1,"Start":1400,"OriginalStart":"485675","End":1500,"OriginalEnd":"511271","Description":"put(\"y\", \"102.14;\")","Metadata":""},{"ClientId":1,"Start":1600,"OriginalStart":"527915","End":1700,"OriginalEnd":"546602","Description":"put(\"y\", \"102.16;\")","Metadata":""},{"ClientId":1,"Start":1700,"OriginalStart":"546602","End":1800,"OriginalEnd":"568242","Description":"put(\"y\", \"102.17;\")","Metadata":""},{"ClientId":1,"Start":1800,"OriginalStart":"568242","End":1900,"OriginalEnd":"581689","Description":"get(\"y\") -\u003e \"102.17;\"","Metadata":""},{"ClientId":1,"Start":1900,"OriginalStart":"581689","End":2000,"OriginalEnd":"600008","Description":"append(\"y\", \"102.19;\")","Metadata":""},{"ClientId":1,"Start":2300,"OriginalStart":"655496","End":2400,"OriginalEnd":"677109","Description":"put(\"y\", \"102.23;\")","Metadata":""},{"ClientId":1,"Start":2800,"OriginalStart":"718261","End":3000,"OriginalEnd":"742846","Description":"append(\"y\", \"102.27;\")","Metadata":""},{"ClientId":1,"Start":3000,"OriginalStart":"742846","End":3100,"OriginalEnd":"755622","Description":"get(\"y\") -\u003e \"102.23;102.27;\"","Metadata":""},{"ClientId":0,"Start":3400,"OriginalStart":"773161","End":3700,"OriginalEnd":"785371","Description":"get(\"y\") -\u003e \"101.0;\"","Metadata":""},{"ClientId":0,"Start":3700,"OriginalStart":"785371","End":4100,"OriginalEnd":"814126","Description":"put(\"y\", \"101.2;\")","Metadata":""},{"ClientId":2,"Start":3900,"OriginalStart":"809736","End":4400,"OriginalEnd":"821625","Description":"get(\"y\") -\u003e \"101.2;\"","Metadata":""},{"ClientId":1,"Start":4200,"OriginalStart":"815113","End":4500,"OriginalEnd":"830799","Description":"append(\"y\", \"102.31;\")","Metadata":""},{"ClientId":2,"Start":4400,"OriginalStart":"821625","End":4700,"OriginalEnd":"850988","Description":"put(\"y\", \"103.4;\")","Metadata":""},{"ClientId":1,"Start":4500,"OriginalStart":"830799","End":4600,"OriginalEnd":"838921","Description":"get(\"y\") -\u003e \"101.2;102.31;\"","Metadata":""},{"ClientId":1,"Start":4900,"OriginalStart":"857346","End":5000,"OriginalEnd":"868596","Description":"get(\"y\") -\u003e \"103.4;\"","Metadata":""},{"ClientId":3,"Start":5200,"OriginalStart":"883735","End":5400,"OriginalEnd":"897576","Description":"get(\"y\") -\u003e \"103.4;\"","Metadata":""},{"ClientId":2,"Start":5300,"OriginalStart":"887510","End":5800,"OriginalEnd":"915881","Description":"put(\"y\", \"103.6;\")","Metadata":""},{"ClientId":3,"Start":5400,"OriginalStart":"897576","End":5700,"OriginalEnd":"905184","Description":"get(\"y\") -\u003e \"103.4;\"","Metadata":""},{"ClientId":0,"Start":5500,"OriginalStart":"899190","End":5900,"OriginalEnd":"926569","Description":"put(\"y\", \"101.6;\")","Metadata":""},{"ClientId":1,"Start":5600,"OriginalStart":"904823","End":6100,"OriginalEnd":"931262","Description":"put(\"y\", \"102.36;\")","Metadata":""},{"ClientId":3,"Start":7100,"OriginalStart":"990647","End":7400,"OriginalEnd":"1003036","Description":"get(\"y\") -\u003e \"102.36;\"","Metadata":""},{"ClientId":0,"Start":7600,"OriginalStart":"1015080","End":8100,"OriginalEnd":"1030980","Description":"get(\"y\") -\u003e \"102.36;\"","Metadata":""},{"ClientId":2,"Start":7900,"OriginalStart":"1020265","End":8200,"OriginalEnd":"1031281","Description":"get(\"y\") -\u003e \"102.36;\"","Metadata":""},{"ClientId":1,"Start":8400,"OriginalStart":"1039782","End":8900,"OriginalEnd":"1067251","Description":"append(\"y\", \"102.42;\")","Metadata":""},{"ClientId":2,"Start":9000,"OriginalStart":"1075778","End":9200,"OriginalEnd":"1087115","Description":"get(\"y\") -\u003e \"102.36;102.42;\"","Metadata":""},{"ClientId":3,"Start":9300,"OriginalStart":"1092237","End":9500,"OriginalEnd":"1099907","Description":"get(\"y\") -\u003e \"102.36;102.42;\"","Metadata":""},{"ClientId":3,"Start":9800,"OriginalStart":"1122384","End":10100,"OriginalEnd":"1135150","Description":"get(\"y\") -\u003e \"102.36;102.42;\"","Metadata":""},{"ClientId":3,"Start":10100,"OriginalStart":"1135150","End":10900,"OriginalEnd":"1168494","Description":"append(\"y\", \"104.23;\")","Metadata":""},{"ClientId":2,"Start":10500,"OriginalStart":"1152787","End":10700,"OriginalEnd":"1163096","Description":"get(\"y\") -\u003e \"102.36;102.42;\"","Metadata":""},{"ClientId":3,"Start":10900,"OriginalStart":"1168494","End":11000,"OriginalEnd":"1179871","Description":"get(\"y\") -\u003e \"102.36;102.42;104.23;\"","Metadata":""},{"ClientId":3,"Start":11000,"OriginalStart":"1179871","End":11300,"OriginalEnd":"1191485","Description":"get(\"y\") -\u003e \"102.36;102.42;104.23;\"","Metadata":""},{"ClientId":1,"Start":11100,"OriginalStart":"1185867","End":11600,"OriginalEnd":"1204553","Description":"put(\"y\", \"102.48;\")","Metadata":""},{"ClientId":0,"Start":11200,"OriginalStart":"1188806","End":11500,"OriginalEnd":"1196102","Description":"get(\"y\") -\u003e \"102.36;102.42;104.23;\"","Metadata":""},{"ClientId":1,"Start":11600,"OriginalStart":"1204553","End":12000,"OriginalEnd":"1226974","Description":"append(\"y\", \"102.49;\")","Metadata":""},{"ClientId":2,"Start":11700,"OriginalStart":"1213864","End":12500,"OriginalEnd":"4784204","Description":"append(\"y\", \"103.23;\")","Metadata":""},{"ClientId":2,"Start":12600,"OriginalStart":"4795249","End":12800,"OriginalEnd":"4802154","Description":"get(\"y\") -\u003e \"102.48;102.49;103.23;\"","Metadata":""},{"ClientId":2,"Start":12800,"OriginalStart":"4802154","End":13100,"OriginalEnd":"4810540","Description":"get(\"y\") -\u003e \"102.48;102.49;103.23;\"","Metadata":""},{"ClientId":0,"Start":13400,"OriginalStart":"4828270","End":14200,"OriginalEnd":"5384481","Description":"put(\"y\", \"101.26;\")","Metadata":""},{"ClientId":1,"Start":13500,"OriginalStart":"4846840","End":13600,"OriginalEnd":"4856923","Description":"get(\"y\") -\u003e \"102.48;102.49;103.23;\"","Metadata":""},{"ClientId":3,"Start":13800,"OriginalStart":"5354026","End":13900,"OriginalEnd":"5369726","Description":"get(\"y\") -\u003e \"101.26;\"","Metadata":""},{"ClientId":0,"Start":14300,"OriginalStart":"5399439","End":14500,"OriginalEnd":"5409142","Description":"get(\"y\") -\u003e \"101.26;\"","Metadata":""},{"ClientId":2,"Start":14700,"OriginalStart":"5418088","End":15000,"OriginalEnd":"5432036","Description":"get(\"y\") -\u003e \"101.26;\"","Metadata":""},{"ClientId":2,"Start":15000,"OriginalStart":"5432036","End":15200,"OriginalEnd":"5440046","Description":"get(\"y\") -\u003e \"101.26;\"","Metadata":""},{"ClientId":1,"Start":15100,"OriginalStart":"5436263","End":15300,"OriginalEnd":"5464660","Description":"put(\"y\", \"102.58;\")","Metadata":""},{"ClientId":2,"Start":15200,"OriginalStart":"5440046","End":16400,"OriginalEnd":"7455304","Description":"get(\"y\") -\u003e \"102.64;\"","Metadata":""},{"ClientId":1,"Start":15500,"OriginalStart":"5500772","End":15600,"OriginalEnd":"5517043","Description":"get(\"y\") -\u003e \"102.58;\"","Metadata":""},{"ClientId":1,"Start":15600,"OriginalStart":"5517043","End":15700,"OriginalEnd":"5527113","Description":"get(\"y\") -\u003e \"102.58;\"","Metadata":""},{"ClientId":1,"Start":15800,"OriginalStart":"5581238","End":15900,"OriginalEnd":"5625584","Description":"put(\"y\", \"102.64;\")","Metadata":""},{"ClientId":1,"Start":16200,"OriginalStart":"5945576","End":16300,"OriginalEnd":"5962368","Description":"get(\"y\") -\u003e \"102.64;\"","Metadata":""},{"ClientId":1,"Start":16500,"OriginalStart":"7484802","End":16600,"OriginalEnd":"7497230","Description":"get(\"y\") -\u003e \"102.64;\"","Metadata":""},{"ClientId":1,"Start":16600,"OriginalStart":"7497230","End":17000,"OriginalEnd":"7617267","Description":"append(\"y\", \"102.71;\")","Metadata":""},{"ClientId":2,"Start":17200,"OriginalStart":"7646838","End":17300,"OriginalEnd":"7704590","Description":"put(\"y\", \"103.38;\")","Metadata":""},{"ClientId":1,"Start":17900,"OriginalStart":"7811863","End":18000,"OriginalEnd":"7898743","Description":"append(\"y\", \"102.76;\")","Metadata":""}],"PartialLinearizations":[[{"Index":1,"StateDescription":"\u003cabsent\u003e"},{"Index":3,"StateDescription":"\"102.4;\""},{"Index":4,"StateDescription":"\"102.5;\""},{"Index":5,"StateDescription":"\"102.5;102.7;\""},{"Index":6,"StateDescription":"\"102.5;102.7;\""},{"Index":7,"StateDescription":"\"102.12;\""},{"Index":8,"StateDescription":"\"102.14;\""},{"Index":9,"StateDescription":"\"102.16;\""},{"Index":10,"StateDescription":"\"102.17;\""},{"Index":11,"StateDescription":"\"102.17;\""},{"Index":12,"StateDescription":"\"102.17;102.19;\""},{"Index":13,"StateDescription":"\"102.23;\""},{"Index":14,"StateDescription":"\"102.23;102.27;\""},{"Index":2,"StateDescription":"\"102.23;102.27;\""},{"Index":15,"StateDescription":"\"102.23;102.27;\""},{"Index":0,"StateDescription":"\"101.0;\""},{"Index":16,"StateDescription":"\"101.0;\""},{"Index":17,"StateDescription":"\"101.2;\""},{"Index":18,"StateDescription":"\"101.2;\""},{"Index":19,"StateDescription":"\"101.2;102.31;\""},{"Index":21,"StateDescription":"\"101.2;102.31;\""},{"Index":20,"StateDescription":"\"103.4;\""},{"Index":22,"StateDescription":"\"103.4;\""},{"Index":23,"StateDescription":"\"103.4;\""},{"Index":25,"StateDescription":"\"103.4;\""},{"Index":24,"StateDescription":"\"103.6;\""},{"Index":26,"StateDescription":"\"101.6;\""},{"Index":27,"StateDescription":"\"102.36;\""},{"Index":28,"StateDescription":"\"102.36;\""},{"Index":29,"StateDescription":"\"102.36;\""},{"Index":30,"StateDescription":"\"102.36;\""},{"Index":31,"StateDescription":"\"102.36;102.42;\""},{"Index":32,"StateDescription":"\"102.36;102.42;\""},{"Index":33,"StateDescription":"\"102.36;102.42;\""},{"Index":34,"StateDescription":"\"102.36;102.42;\""},{"Index":36,"StateDescription":"\"102.36;102.42;\""},{"Index":35,"StateDescription":"\"102.36;102.42;104.23;\""},{"Index":37,"StateDescription":"\"102.36;102.42;104.23;\""},{"Index":38,"StateDescription":"\"102.36;102.42;104.23;\""},{"Index":40,"StateDescription":"\"102.36;102.42;104.23;\""},{"Index":39,"StateDescription":"\"102.48;\""},{"Index":41,"StateDescription":"\"102.48;102.49;\""},{"Index":42,"StateDescription":"\"102.48;102.49;103.23;\""},{"Index":43,"StateDescription":"\"102.48;102.49;103.23;\""},{"Index":44,"StateDescription":"\"102.48;102.49;103.23;\""},{"Index":46,"StateDescription":"\"102.48;102.49;103.23;\""},{"Index":45,"StateDescription":"\"101.26;\""},{"Index":47,"StateDescription":"\"101.26;\""},{"Index":48,"StateDescription":"\"101.26;\""},{"Index":49,"StateDescription":"\"101.26;\""},{"Index":50,"StateDescription":"\"101.26;\""},{"Index":51,"StateDescription":"\"102.58;\""},{"Index":53,"StateDescription":"\"102.58;\""},{"Index":54,"StateDescription":"\"102.58;\""},{"Index":55,"StateDescription":"\"102.64;\""},{"Index":52,"StateDescription":"\"102.64;\""},{"Index":56,"StateDescription":"\"102.64;\""},{"Index":57,"StateDescription":"\"102.64;\""},{"Index":58,"StateDescription":"\"102.64;102.71;\""},{"Index":59,"StateDescription":"\"103.38;\""},{"Index":60,"StateDescription":"\"103.38;102.76;\""}]],"Largest":{"0":0,"1":0,"10":0,"11":0,"12":0,"13":0,"14":0,"15":0,"16":0,"17":0,"18":0,"19":0,"2":0,"20":0,"21":0,"22":0,"23":0,"24":0,"25":0,"26":0,"27":0,"28":0,"29":0,"3":0,"30":0,"31":0,"32":0,"33":0,"34":0,"35":0,"36":0,"37":0,"38":0,"39":0,"4":0,"40":0,"41":0,"42":0,"43":0,"44":0,"45":0,"46":0,"47":0,"48":0,"49":0,"5":0,"50":0,"51":0,"52":0,"53":0,"54":0,"55":0,"56":0,"57":0,"58":0,"59":0,"6":0,"60":0,"7":0,"8":0,"9":0}},{"History":[{"ClientId":1,"Start":100,"OriginalStart":"271157","End":200,"OriginalEnd":"287141","Description":"put(\"z\", \"102.1;\")","Metadata":""},{"ClientId":1,"Start":200,"OriginalStart":"287141","End":300,"OriginalEnd":"309425","Description":"put(\"z\", \"102.2;\")","Metadata":""},{"ClientId":1,"Start":300,"OriginalStart":"309425","End":400,"OriginalEnd":"315418","Description":"get(\"z\") -\u003e \"102.2;\"","Metadata":""},{"ClientId":1,"Start":800,"OriginalStart":"405847","End":900,"OriginalEnd":"413828","Description":"get(\"z\") -\u003e \"102.2;\"","Metadata":""},{"ClientId":1,"Start":1000,"OriginalStart":"422627","End":1100,"OriginalEnd":"437279","Description":"put(\"z\", \"102.10;\")","Metadata":""},{"ClientId":1,"Start":1100,"OriginalStart":"437279","End":1200,"OriginalEnd":"447235","Description":"get(\"z\") -\u003e \"102.10;\"","Metadata":""},{"ClientId":1,"Start":1500,"OriginalStart":"511271","End":1600,"OriginalEnd":"527915","Description":"put(\"z\", \"102.15;\")","Metadata":""},{"ClientId":1,"Start":2200,"OriginalStart":"629416","End":2300,"OriginalEnd":"655496","Description":"append(\"z\", \"102.22;\")","Metadata":""},{"ClientId":1,"Start":2500,"OriginalStart":"685719","End":2600,"OriginalEnd":"697507","Description":"get(\"z\") -\u003e \"102.15;102.22;\"","Metadata":""},{"ClientId":3,"Start":2900,"OriginalStart":"732538","End":3300,"OriginalEnd":"764964","Description":"append(\"z\", \"104.2;\")","Metadata":""},{"ClientId":2,"Start":3200,"OriginalStart":"757272","End":3500,"OriginalEnd":"780035","Description":"append(\"z\", \"103.1;\")","Metadata":""},{"ClientId":3,"Start":3300,"OriginalStart":"764964","End":3800,"OriginalEnd":"793790","Description":"append(\"z\", \"104.3;\")","Metadata":""},{"ClientId":1,"Start":3600,"OriginalStart":"784748","End":4200,"OriginalEnd":"815113","Description":"append(\"z\", \"102.30;\")","Metadata":""},{"ClientId":3,"Start":3800,"OriginalStart":"793790","End":4000,"OriginalEnd":"811016","Description":"append(\"z\", \"104.4;\")","Metadata":""},{"ClientId":3,"Start":4000,"OriginalStart":"811016","End":4300,"OriginalEnd":"815929","Description":"get(\"z\") -\u003e \"102.15;102.22;104.2;103.1;104.3;102.30;104.4;\"","Metadata":""},{"ClientId":0,"Start":4100,"OriginalStart":"814126","End":4700,"OriginalEnd":"850988","Description":"put(\"z\", \"101.3;\")","Metadata":""},{"ClientId":1,"Start":4600,"OriginalStart":"838921","End":4900,"OriginalEnd":"857346","Description":"append(\"z\", \"102.33;\")","Metadata":""},{"ClientId":2,"Start":4700,"OriginalStart":"850988","End":5300,"OriginalEnd":"887510","Description":"put(\"z\", \"103.5;\")","Metadata":""},{"ClientId":0,"Start":5100,"OriginalStart":"873908","End":5500,"OriginalEnd":"899190","Description":"append(\"z\", \"101.5;\")","Metadata":""},{"ClientId":3,"Start":5700,"OriginalStart":"905184","End":6200,"OriginalEnd":"939388","Description":"append(\"z\", \"104.10;\")","Metadata":""},{"ClientId":3,"Start":6200,"OriginalStart":"939388","End":6500,"OriginalEnd":"967769","Description":"append(\"z\", \"104.11;\")","Metadata":""},{"ClientId":1,"Start":6400,"OriginalStart":"960353","End":6900,"OriginalEnd":"988799","Description":"append(\"z\", \"102.38;\")","Metadata":""},{"ClientId":3,"Start":6500,"OriginalStart":"967769","End":6800,"OriginalEnd":"980372","Description":"get(\"z\") -\u003e \"103.5;101.5;104.10;104.11;\"","Metadata":""},{"ClientId":2,"Start":6600,"OriginalStart":"971767","End":7000,"OriginalEnd":"988889","Description":"get(\"z\") -\u003e \"103.5;101.5;104.10;104.11;\"","Metadata":""},{"ClientId":0,"Start":6700,"OriginalStart":"977391","End":7200,"OriginalEnd":"997089","Description":"put(\"z\", \"101.9;\")","Metadata":""},{"ClientId":0,"Start":7200,"OriginalStart":"997089","End":7600,"OriginalEnd":"1015080","Description":"get(\"z\") -\u003e \"101.9;\"","Metadata":""},{"ClientId":3,"Start":7400,"OriginalStart":"1003036","End":7500,"OriginalEnd":"1008684","Description":"get(\"z\") -\u003e \"101.9;\"","Metadata":""},{"ClientId":1,"Start":8000,"OriginalStart":"1025324","End":8400,"OriginalEnd":"1039782","Description":"get(\"z\") -\u003e \"101.9;\"","Metadata":""},{"ClientId":0,"Start":8100,"OriginalStart":"1030980","End":8300,"OriginalEnd":"1038218","Description":"get(\"z\") -\u003e \"101.9;\"","Metadata":""},{"ClientId":0,"Start":8300,"OriginalStart":"1038218","End":8600,"OriginalEnd":"1049368","Description":"get(\"z\") -\u003e \"101.9;\"","Metadata":""},{"ClientId":3,"Start":8800,"OriginalStart":"1064712","End":9300,"OriginalEnd":"1092237","Description":"append(\"z\", \"104.19;\")","Metadata":""},{"ClientId":3,"Start":9500,"OriginalStart":"1099907","End":9800,"OriginalEnd":"1122384","Description":"append(\"z\", \"104.21;\")","Metadata":""},{"ClientId":2,"Start":10000,"OriginalStart":"1131608","End":10400,"OriginalEnd":"1143413","Description":"get(\"z\") -\u003e \"101.9;104.19;104.21;\"","Metadata":""},{"ClientId":2,"Start":10700,"OriginalStart":"1163096","End":11400,"OriginalEnd":"1192657","Description":"put(\"z\", \"103.21;\")","Metadata":""},{"ClientId":0,"Start":10800,"OriginalStart":"1163687","End":11200,"OriginalEnd":"1188806","Description":"append(\"z\", \"101.18;\")","Metadata":""},{"ClientId":3,"Start":11300,"OriginalStart":"1191485","End":11800,"OriginalEnd":"1215360","Description":"append(\"z\", \"104.26;\")","Metadata":""},{"ClientId":2,"Start":11400,"OriginalStart":"1192657","End":11700,"OriginalEnd":"1213864","Description":"append(\"z\", \"103.22;\")","Metadata":""},{"ClientId":1,"Start":12000,"OriginalStart":"1226974","End":12700,"OriginalEnd":"4799259","Description":"put(\"z\", \"102.50;\")","Metadata":""},{"ClientId":3,"Start":12300,"OriginalStart":"4780372","End":12900,"OriginalEnd":"4805484","Description":"append(\"z\", \"104.28;\")","Metadata":""},{"ClientId":1,"Start":12700,"OriginalStart":"4799259","End":13200,"OriginalEnd":"4811748","Description":"get(\"z\") -\u003e \"102.50;104.28;\"","Metadata":""},{"ClientId":0,"Start":13000,"OriginalStart":"4806799","End":13400,"OriginalEnd":"4828270","Description":"put(\"z\", \"101.25;\")","Metadata":""},{"ClientId":3,"Start":13700,"OriginalStart":"5328543","End":13800,"OriginalEnd":"5354026","Description":"put(\"z\", \"104.30;\")","Metadata":""},{"ClientId":1,"Start":14400,"OriginalStart":"5401436","End":14900,"OriginalEnd":"5429112","Description":"append(\"z\", \"102.56;\")","Metadata":""},{"ClientId":0,"Start":14500,"OriginalStart":"5409142","End":14600,"OriginalEnd":"5415173","Description":"get(\"z\") -\u003e \"104.30;\"","Metadata":""},{"ClientId":0,"Start":14600,"OriginalStart":"5415173","End":14800,"OriginalEnd":"5422363","Description":"get(\"z\") -\u003e \"104.30;102.56;\"","Metadata":""},{"ClientId":1,"Start":14900,"OriginalStart":"5429112","End":15100,"OriginalEnd":"5436263","Description":"get(\"z\") -\u003e \"104.30;102.56;\"","Metadata":""},{"ClientId":1,"Start":15400,"OriginalStart":"5482819","End":15500,"OriginalEnd":"5500772","Description":"get(\"z\") -\u003e \"104.30;102.56;\"","Metadata":""},{"ClientId":1,"Start":15900,"OriginalStart":"5625584","End":16000,"OriginalEnd":"5636402","Description":"get(\"z\") -\u003e \"104.30;102.56;\"","Metadata":""},{"ClientId":1,"Start":16000,"OriginalStart":"5636402","End":16100,"OriginalEnd":"5934788","Description":"put(\"z\", \"102.66;\")","Metadata":""},{"ClientId":1,"Start":16100,"OriginalStart":"5934788","End":16200,"OriginalEnd":"5945576","Description":"get(\"z\") -\u003e \"102.66;\"","Metadata":""},{"ClientId":1,"Start":16300,"OriginalStart":"5962368","End":16500,"OriginalEnd":"7484802","Description":"get(\"z\") -\u003e \"104.30;102.56;\"","Metadata":""},{"ClientId":2,"Start":16400,"OriginalStart":"7455304","End":16700,"OriginalEnd":"7505658","Description":"put(\"z\", \"103.33;\")","Metadata":""},{"ClientId":2,"Start":16700,"OriginalStart":"7505658","End":16800,"OriginalEnd":"7512093","Description":"get(\"z\") -\u003e \"103.33;\"","Metadata":""},{"ClientId":2,"Start":16900,"OriginalStart":"7616495","End":17100,"OriginalEnd":"7629173","Description":"get(\"z\") -\u003e \"103.33;\"","Metadata":""},{"ClientId":1,"Start":17000,"OriginalStart":"7617267","End":17400,"OriginalEnd":"7707769","Description":"put(\"z\", \"102.72;\")","Metadata":""},{"ClientId":2,"Start":17100,"OriginalStart":"7629173","End":17200,"OriginalEnd":"7646838","Description":"get(\"z\") -\u003e \"103.33;\"","Metadata":""},{"ClientId":2,"Start":17300,"OriginalStart":"7704590","End":17500,"OriginalEnd":"7727280","Description":"append(\"z\", \"103.39;\")","Metadata":""},{"ClientId":2,"Start":17500,"OriginalStart":"7727280","End":17800,"OriginalEnd":"7749499","Description":"put(\"z\", \"103.40;\")","Metadata":""},{"ClientId":1,"Start":17600,"OriginalStart":"7735087","End":17700,"OriginalEnd":"7743434","Description":"get(\"z\") -\u003e \"102.72;103.39;\"","Metadata":""},{"ClientId":1,"Start":17700,"OriginalStart":"7743434","End":17900,"OriginalEnd":"7811863","Description":"append(\"z\", \"102.75;\")","Metadata":""},{"ClientId":2,"Start":17800,"OriginalStart":"7749499","End":18100,"OriginalEnd":"7898744","Description":"get(\"z\", \"\") -\u003e ?","Metadata":""},{"ClientId":1,"Start":18000,"OriginalStart":"7898743","End":18100,"OriginalEnd":"7898744","Description":"append(\"z\", \"102.77;\") -\u003e ?","Metadata":""}],"PartialLinearizations":[[{"Index":0,"StateDescription":"\"102.1;\""},{"Index":1,"StateDescription":"\"102.2;\""},{"Index":2,"StateDescription":"\"102.2;\""},{"Index":3,"StateDescription":"\"102.2;\""},{"Index":4,"StateDescription":"\"102.10;\""},{"Index":5,"StateDescription":"\"102.10;\""},{"Index":6,"StateDescription":"\"102.15;\""},{"Index":7,"StateDescription":"\"102.15;102.22;\""},{"Index":8,"StateDescription":"\"102.15;102.22;\""},{"Index":9,"StateDescription":"\"102.15;102.22;104.2;\""},{"Index":10,"StateDescription":"\"102.15;102.22;104.2;103.1;\""},{"Index":11,"StateDescription":"\"102.15;102.22;104.2;103.1;104.3;\""},{"Index":12,"StateDescription":"\"102.15;102.22;104.2;103.1;104.3;102.30;\""},{"Index":13,"StateDescription":"\"102.15;102.22;104.2;103.1;104.3;102.30;104.4;\""},{"Index":14,"StateDescription":"\"102.15;102.22;104.2;103.1;104.3;102.30;104.4;\""},{"Index":15,"StateDescription":"\"101.3;\""},{"Index":16,"StateDescription":"\"101.3;102.33;\""},{"Index":17,"StateDescription":"\"103.5;\""},{"Index":18,"StateDescription":"\"103.5;101.5;\""},{"Index":19,"StateDescription":"\"103.5;101.5;104.10;\""},{"Index":20,"StateDescription":"\"103.5;101.5;104.10;104.11;\""},{"Index":22,"StateDescription":"\"103.5;101.5;104.10;104.11;\""},{"Index":23,"StateDescription":"\"103.5;101.5;104.10;104.11;\""},{"Index":21,"StateDescription":"\"103.5;101.5;104.10;104.11;102.38;\""},{"Index":24,"StateDescription":"\"101.9;\""},{"Index":25,"StateDescription":"\"101.9;\""},{"Index":26,"StateDescription":"\"101.9;\""},{"Index":27,"StateDescription":"\"101.9;\""},{"Index":28,"StateDescription":"\"101.9;\""},{"Index":29,"StateDescription":"\"101.9;\""},{"Index":30,"StateDescription":"\"101.9;104.19;\""},{"Index":31,"StateDescription":"\"101.9;104.19;104.21;\""},{"Index":32,"StateDescription":"\"101.9;104.19;104.21;\""},{"Index":33,"StateDescription":"\"103.21;\""},{"Index":34,"StateDescription":"\"103.21;101.18;\""},{"Index":35,"StateDescription":"\"103.21;101.18;104.26;\""},{"Index":36,"StateDescription":"\"103.21;101.18;104.26;103.22;\""},{"Index":37,"StateDescription":"\"102.50;\""},{"Index":38,"StateDescription":"\"102.50;104.28;\""},{"Index":39,"StateDescription":"\"102.50;104.28;\""},{"Index":40,"StateDescription":"\"101.25;\""},{"Index":41,"StateDescription":"\"104.30;\""},{"Index":43,"StateDescription":"\"104.30;\""},{"Index":42,"StateDescription":"\"104.30;102.56;\""},{"Index":44,"StateDescription":"\"104.30;102.56;\""},{"Index":45,"StateDescription":"\"104.30;102.56;\""},{"Index":46,"StateDescription":"\"104.30;102.56;\""},{"Index":47,"StateDescription":"\"104.30;102.56;\""},{"Index":48,"StateDescription":"\"102.66;\""},{"Index":49,"StateDescription":"\"102.66;\""},{"Index":51,"StateDescription":"\"103.33;\""}]],"Largest":{"0":0,"1":0,"10":0,"11":0,"12":0,"13":0,"14":0,"15":0,"16":0,"17":0,"18":0,"19":0,"2":0,"20":0,"21":0,"22":0,"23":0,"24":0,"25":0,"26":0,"27":0,"28":0,"29":0,"3":0,"30":0,"31":0,"32":0,"33":0,"34":0,"35":0,"36":0,"37":0,"38":0,"39":0,"4":0,"40":0,"41":0,"42":0,"43":0,"44":0,"45":0,"46":0,"47":0,"48":0,"49":0,"5":0,"51":0,"6":0,"7":0,"8":0,"9":0}}],"Annotations":[]}
+
+      render(data)
+    </script>
+  </body>
+</html>

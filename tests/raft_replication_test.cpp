@@ -142,7 +142,7 @@ TEST(RaftReplication, EntriesSurviveAFullClusterCrash) {
 // once everything heals, all nodes must converge on one log that keeps every entry that was
 // ever committed.
 TEST(RaftReplication, ChaosWithWorkloadKeepsEveryInvariantAndConverges) {
-    for (std::uint64_t seed : seeds(100)) {
+    for (std::uint64_t seed : test::chaos_seeds(100)) {
         for (int n : {3, 5}) {
             RaftCluster c(seed, n);
             c.quiet();

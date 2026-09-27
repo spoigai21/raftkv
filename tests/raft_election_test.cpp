@@ -174,7 +174,7 @@ TEST(RaftElection, SingleNodeClusterElectsItself) {
 // Random crashes, restarts, partitions, pauses and loss. Election Safety is checked after
 // every event; once everything heals, a leader must appear.
 TEST(RaftElection, ChaosKeepsElectionSafetyAndRecovers) {
-    for (std::uint64_t seed : seeds(200)) {
+    for (std::uint64_t seed : test::chaos_seeds(200)) {
         for (int n : {3, 5}) {
             RaftCluster c(seed, n);
             c.quiet();   // hash only; rerun one seed to see the log

@@ -146,7 +146,7 @@ TEST(Kv, DeposedLeaderFailsPendingRequestsPromptly) {
 // shared key must hold every acknowledged append exactly once. (Phase 6 checks full
 // linearizability; this checks the dedup and no-loss parts of it directly.)
 TEST(Kv, ChaosWithClientsNeverLosesOrDuplicatesAnAppend) {
-    for (std::uint64_t seed : seeds(50)) {
+    for (std::uint64_t seed : test::chaos_seeds(50)) {
         RaftCluster c(seed, 5, ClusterOptions{.kv = true, .clients = 3});
         c.quiet();
         c.schedule_chaos(seed, 10s);

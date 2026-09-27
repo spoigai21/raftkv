@@ -9,6 +9,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(RAFTKV_BUILD_TESTS "Build unit tests" ON)
 option(RAFTKV_BUILD_BENCH "Build benchmarks" ON)
 option(RAFTKV_FUZZ "Build libFuzzer targets (clang only; targets arrive in Phase 4)" OFF)
+# The heavy chaos tests run 1/N of their seeds; the sanitizer presets set N > 1 (see
+# tests/test_seeds.hpp). Release builds run every seed.
+set(RAFTKV_SEED_DIVISOR 1 CACHE STRING "Run 1/N of the seeds in the heavy chaos tests")
 
 # Every dependency is found now, even ones Phase 0 does not use yet, so that vcpkg
 # problems (protobuf/abseil above all) surface before there is any logic to debug.
@@ -86,8 +89,11 @@ if(RAFTKV_BUILD_TESTS)
         tests/kv_state_machine_test.cpp
         tests/kv_test.cpp
         tests/net_test.cpp
+        tests/linearizability_test.cpp
     )
-    target_link_libraries(raftkv_tests PRIVATE raftkv raftkv_warnings GTest::gtest_main)
+    target_link_libraries(raftkv_tests PRIVATE raftkv raftkv_warnings GTest::gtest_main
+                                               nlohmann_json::nlohmann_json)
+    target_compile_definitions(raftkv_tests PRIVATE RAFTKV_SEED_DIVISOR=${RAFTKV_SEED_DIVISOR})
     gtest_discover_tests(raftkv_tests DISCOVERY_MODE PRE_TEST)
 
     # Real processes: three raftkvd and raftkvctl on localhost (tests/cluster/smoke.sh).
@@ -95,6 +101,14 @@ if(RAFTKV_BUILD_TESTS)
              COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/cluster/smoke.sh
                      $<TARGET_FILE:raftkvd> $<TARGET_FILE:raftkvctl>)
     set_tests_properties(cluster_smoke PROPERTIES TIMEOUT 180)
+
+    # Linearizability: simulator histories checked by Porcupine (tests/lincheck/run.sh).
+    # Skipped (exit 77) where Go is not installed, except in CI, which requires it.
+    add_test(NAME lincheck
+             COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/lincheck/run.sh
+                     $<TARGET_FILE:raftkv_tests> ${CMAKE_CURRENT_SOURCE_DIR}
+                     ${CMAKE_CURRENT_BINARY_DIR}/lincheck)
+    set_tests_properties(lincheck PROPERTIES TIMEOUT 900 SKIP_RETURN_CODE 77)
 endif()
 
 if(RAFTKV_FUZZ)

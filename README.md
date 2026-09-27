@@ -4,7 +4,7 @@ A replicated key–value store in C++20, built on the Raft consensus algorithm.
 It runs as 3 or 5 processes on one machine, talking over real sockets, and keeps working when a minority of them crash.
 It is a learning project: one Raft group, no transactions or indexes, and it isn't built to be fast.
 
-> **Status:** Phase 5 — a working replicated KV store: real server processes, crash-safe storage, duplicate detection. Linearizability checking (Phase 6) is next.
+> **Status:** Phase 6 — a working replicated KV store, checked linearizable by Porcupine across 200 fault-injected histories. The fault matrix (Phase 7) is next.
 
 ## What it will do
 
@@ -19,7 +19,7 @@ It is a learning project: one Raft group, no transactions or indexes, and it isn
 
 - **Deterministic simulator:** the whole cluster runs in one process on a virtual clock with a seeded network, so any failure replays exactly from `--seed N`.
 - **Fault matrix:** crashes, partitions, message drops, delays and corrupted logs are all injected by automated tests.
-- **Linearizability checking:** recorded operation histories are checked with [Porcupine](https://github.com/anishathalye/porcupine).
+- **Linearizability checking:** recorded operation histories are checked with [Porcupine](https://github.com/anishathalye/porcupine), through a small Go tool in `tools/lincheck` (a dev dependency only). See [`docs/lincheck/`](docs/lincheck/) for what a failure looks like.
 - **Memory and thread safety:** CI runs ASan, UBSan and TSan, and the log decoder is fuzzed with libFuzzer.
 - **Benchmarks:** throughput, latency and failover time, written to `docs/results.csv`.
 

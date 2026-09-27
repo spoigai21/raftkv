@@ -16,12 +16,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Determinism lint (implementation guide §3.2)
         run: tools/check_determinism.sh
-      # Go is needed for tools/lincheck from Phase 6; installed now so CI setup does not change later.
       - uses: actions/setup-go@v5
         with:
-          go-version: stable
-          cache: false
-      - run: go version
+          go-version-file: tools/lincheck/go.mod
+          cache-dependency-path: tools/lincheck/go.sum
+      - name: Vet the linearizability checker
+        run: cd tools/lincheck && go vet ./...
 
   build:
     name: ${{ matrix.preset }} / ${{ matrix.compiler.cc }}
@@ -38,11 +38,18 @@ jobs:
       CXX: ${{ matrix.compiler.cxx }}
       VCPKG_ROOT: ${{ github.workspace }}/vcpkg
       VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.vcpkg-cache,readwrite
+      RAFTKV_REQUIRE_GO: 1   # the lincheck test must run, never skip
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Ninja
         run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      # Go builds tools/lincheck, the Porcupine linearizability checker (Phase 6).
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/lincheck/go.mod
+          cache-dependency-path: tools/lincheck/go.sum
 
       # TSan on 6.x kernels fails with "unexpected memory mapping" at the default ASLR entropy.
       - name: Lower mmap randomization for TSan

@@ -710,6 +710,32 @@ alternative (porting the WGL algorithm to C++) is a fine stretch goal but not th
 **Done when:** 100 randomized seeds with concurrent clients and injected faults all pass,
 and `docs/` contains at least one saved visualization of a real bug you found and fixed.
 
+*As built* (`tools/lincheck/`, `tests/linearizability_test.cpp`, `tests/lincheck/run.sh`):
+
+- **Workload:** 4 clients on 3 keys, 40% get, 30% put, 30% append, with unique values. It
+  runs against 5 servers under random crashes, partitions, pauses and loss. Times are
+  virtual time, taken at the client.
+- **Two variants per seed.** *Healed:* faults stop at 10 s and every operation completes.
+  *Cut-off:* the run stops at 8 s mid-chaos, and each client's last operation never
+  returns. It is recorded with no return and checked as "may or may not have happened".
+- `tools/lincheck` is a Go program using Porcupine v1.3.1, with a KV model partitioned by
+  key. It writes an HTML visualization for each failing history.
+- ctest's `lincheck` test records the histories and checks them. It is skipped where Go is
+  missing (exit 77), except in CI, which sets `RAFTKV_REQUIRE_GO=1`.
+- **Result: 100 seeds × 2 variants, 82,539 operations, all linearizable.**
+- **Planted bugs are all caught:**
+  - leader-local reads: 6 of 200 histories;
+  - any-server local reads: 68;
+  - no dedup: 157;
+  - replying before commit: 77.
+- **The done-gate asks for a visualization of a real bug. There is none:** the checker has
+  not found a real linearizability bug. `docs/lincheck/` holds a **clearly labelled planted**
+  one instead: the classic stale read from a leader that does not know it has been deposed.
+  It includes the exact pair of reads that proves it.
+- **Seed scaling:** the heavy chaos tests run 1/5 of their seeds under the ASan and TSan
+  presets (`RAFTKV_SEED_DIVISOR`). The rel preset runs all of them. Without this the
+  sanitizer CI jobs would have gone past 15 minutes.
+
 ---
 
 ## Phase 7 — The fault matrix
