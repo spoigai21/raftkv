@@ -43,6 +43,17 @@ kill9() {  # kill -9 node $1
     PID[$1]=0
 }
 ctl() { "$RAFTKVCTL" --cluster "$CLUSTER" --timeout-ms 10000 "$@"; }
+# Waits up to $2 seconds for process $1 to exit and sets RC to its exit status; returns 1 if
+# it is still running. Nothing in this script waits without a deadline, so a hang fails fast,
+# with logs, instead of running into ctest's timeout.
+wait_exit() {
+    local pid=$1 deadline=$((SECONDS + $2))
+    while kill -0 "$pid" 2>/dev/null; do
+        (( SECONDS < deadline )) || return 1
+        sleep 0.1
+    done
+    set +e; wait "$pid"; RC=$?; set -e
+}
 leader_of() {  # run an op, print the id of the server that answered
     ctl --verbose "$@" 2>&1 >/dev/null | sed -n 's/^served-by \([0-9]*\).*/\1/p'
 }
@@ -97,20 +108,25 @@ echo "== 4. a corrupted log makes the node refuse to start"
 kill9 3
 LOG=$WORK/data3/log
 SIZE=$(wc -c <"$LOG" | tr -d ' ')
-printf '\xa5' | dd of="$LOG" bs=1 seek=$((SIZE / 2)) conv=notrunc 2>/dev/null
-set +e
-"$RAFTKVD" --id 3 --cluster "$CLUSTER" --data-dir "$WORK/data3" >>"$WORK/node3.log" 2>&1
-rc=$?
-set -e
-[[ $rc -eq 1 ]] || fail "node 3 started on a corrupt log (exit $rc)"
+AT=$((SIZE / 2))
+BEFORE=$(od -An -tx1 -j "$AT" -N1 "$LOG" | tr -d ' ')
+NEW=$([[ $BEFORE == a5 ]] && echo 5a || echo a5)
+printf "\\x$NEW" | dd of="$LOG" bs=1 seek="$AT" conv=notrunc 2>/dev/null
+AFTER=$(od -An -tx1 -j "$AT" -N1 "$LOG" | tr -d ' ')
+# Make sure the corruption really happened, so a pass means "refused", not "nothing to refuse".
+[[ $AFTER == "$NEW" ]] || fail "could not corrupt byte $AT of a $SIZE-byte log (was $BEFORE, now $AFTER)"
+"$RAFTKVD" --id 3 --cluster "$CLUSTER" --data-dir "$WORK/data3" >>"$WORK/node3.log" 2>&1 &
+P3=$!
+if ! wait_exit $P3 10; then kill -9 $P3; fail "node 3 is running on a corrupt log (log size $SIZE)"; fi
+[[ $RC -eq 1 ]] || fail "node 3 started on a corrupt log (exit $RC)"
 grep -q "refusing to start" "$WORK/node3.log" || fail "no refusal message"
 [[ $(ctl put after-corruption yes) == OK ]] || fail "the other two stopped serving"
 
 echo "== shut down"
 for i in 1 2; do kill -TERM "${PID[$i]}"; done
 for i in 1 2; do
-    set +e; wait "${PID[$i]}"; rc=$?; set -e
+    wait_exit "${PID[$i]}" 10 || fail "node $i did not exit within 10 s of SIGTERM"
     PID[$i]=0
-    [[ $rc -eq 0 ]] || fail "node $i exited $rc on SIGTERM"
+    [[ $RC -eq 0 ]] || fail "node $i exited $RC on SIGTERM"
 done
 echo "PASS"

@@ -45,7 +45,8 @@ public:
         asio::error_code ignored;
         socket_.shutdown(tcp::socket::shutdown_both, ignored);
         socket_.close(ignored);
-        queue_.clear();
+        // queue_ is left alone: an async_write may still point into its front frame. The
+        // frames are freed with the Connection, once the last handler holding it has run.
         if (on_closed_) on_closed_(shared_from_this());
     }
 
@@ -74,6 +75,9 @@ private:
     void write_next() {
         asio::async_write(socket_, asio::buffer(queue_.front()),
                           [self = shared_from_this()](asio::error_code ec, std::size_t) {
+                              // The read side may have closed the connection between this
+                              // write finishing and this handler running (postmortem 002).
+                              if (self->closed_) return;
                               if (ec) {
                                   self->close();
                                   return;

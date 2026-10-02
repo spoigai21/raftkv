@@ -128,6 +128,43 @@ TEST(AsioEnv, ClientAndServerExchangeMessagesOverTcp) {
     EXPECT_EQ(client.inbox[0].from, 1u);
 }
 
+// Regression test for a crash found by the Phase 7 repeat runs: when the peer vanished, the
+// read side closed the connection and cleared the outgoing queue while a write was still in
+// flight; the write then completed and popped from the empty queue (undefined behaviour).
+// Here a client keeps small writes completing while the server end is closed under it, so a
+// successful write completion and the read side's error land together.
+TEST(AsioEnv, PeerClosingWhileWritesAreInFlightIsSafe) {
+    for (int round = 0; round < 300; ++round) {
+        asio::io_context io;
+        net::NetConfig server_cfg{.id = 1, .servers = {{1, {asio::ip::make_address("127.0.0.1"), 0}}}, .listen = true};
+        auto server_env = std::make_unique<net::AsioEnv>(io, server_cfg, nullptr);
+        test::ProbeNode server(*server_env);
+        server_env->start(server);
+
+        net::NetConfig client_cfg{.id = 0x80000001u,
+                                  .servers = {{1, {asio::ip::make_address("127.0.0.1"), server_env->listening_port()}}},
+                                  .listen = false};
+        net::AsioEnv client_env(io, client_cfg, nullptr);
+        test::ProbeNode client(client_env);
+        client_env.start(client);
+
+        asio::steady_timer t(io);
+        std::function<void(int)> pump = [&](int n) {
+            for (int i = 0; i < 4; ++i) client_env.send({.from = 0, .to = 1, .method = "Ping", .payload = "x"});
+            if (n == 5 + round % 7) server_env->stop();   // the peer vanishes mid-stream
+            if (n == 20) {
+                client_env.stop();
+                return;
+            }
+            t.expires_after(std::chrono::microseconds(100 * (1 + round % 5)));
+            t.async_wait([&, n](asio::error_code ec) { if (!ec) pump(n + 1); });
+        };
+        asio::post(io, [&] { pump(0); });
+        io.run_for(std::chrono::seconds(5));
+    }
+    SUCCEED() << "no crash and no sanitizer report";
+}
+
 TEST(AsioEnv, TimersFireAndCancel) {
     asio::io_context io;
     net::AsioEnv env(io, {.id = 1, .servers = {}, .listen = false}, nullptr);
