@@ -160,6 +160,9 @@ void Sim::send(raft::Message m) {
     const auto lo = static_cast<std::uint64_t>(faults_.delay_min.count());
     const auto hi = static_cast<std::uint64_t>(std::max(faults_.delay_min, faults_.delay_max).count());
     raft::Time at = now_ + raft::Duration(static_cast<raft::Duration::rep>(rng_.between(lo, hi)));
+    if (auto slow = faults_.link_delay.find({m.from, m.to}); slow != faults_.link_delay.end()) {
+        at = at + slow->second;
+    }
     if (!faults_.reorder) {
         // Equal times are fine: ties run in scheduling order, which is send order.
         raft::Time& last = link_last_[{m.from, m.to}];

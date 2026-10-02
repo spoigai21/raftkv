@@ -765,6 +765,43 @@ The real-process runs are not seed-replayable, so the README says which rows ran
 **Done when:** every row passes under `--seed` replay, at `ctest --repeat until-fail:10`,
 with ASan/UBSan and TSan both clean.
 
+*As built* (`tests/fault_matrix_test.cpp`; the table with measured results is in the README):
+
+- **How each row runs.** It is a `FaultMatrix.*` test on 3 KV servers with 3 clients doing
+  get/put/append, over 20 seeds. Each run checks the row's own expectation, then heals
+  everything, lets every client finish, reads every key once more, and requires
+  convergence. Each run's history also goes to Porcupine (`tests/lincheck/run.sh` now
+  includes the matrix): 440 histories and 251,969 operations, all linearizable. That
+  linearizability check is what backs "no acknowledged write lost".
+- **The slow-follower row is split in two.** Data from a probe run showed the plan's single
+  row hid a real difference:
+  - slow **replies** only: stable, p50 +12%. The leader loses the faster-of-two follower;
+  - a slow link **both ways**: the delay exceeds the election timeout, so the follower
+    keeps calling elections (98 over 20 seeds), costing up to 22% throughput. This is the
+    no-PreVote limit from Phase 2, now with a number on it.
+- **20% drops:** progress continues for every client, but at 5.2% of normal throughput. A
+  traced seed showed why: each lost message costs the client a full 500 ms timeout, then a
+  redirect via a follower, including when the lost message was the leader's "ok". This is
+  left for Phase 9 to measure (prediction 4) before the client is changed. The obvious
+  candidates are retrying the same server once, and a timeout closer to the round trip.
+- **Three of the plan's expectations did not hold as written**, and the README says so
+  instead of tuning the tests until they passed. A planted bug (commit without a majority)
+  fails 5 rows.
+- **Done-gate:** `--repeat until-fail:10` first ran on every row plus the real-process
+  test. The simulator rows passed 10/10 under ASan/UBSan and TSan. **The real-process test
+  did not**: it exposed a crash in the TCP transport. A surviving server segfaulted when a
+  peer was `kill -9`'d mid-write, failing 5 of 20 Release runs. It is now fixed with a
+  regression test (`docs/postmortems/002-pop-from-emptied-write-queue.md`). After the fix,
+  the real-process test passed 10/10 under both sanitizers and 19/19 in Release.
+- **Hardening:** the ASan and TSan presets now build with libc++ hardening and
+  `_GLIBCXX_ASSERTIONS`. With the bug put back, the hardened build trapped on the exact
+  faulty line in 3 of 3 runs, where the plain build segfaulted later, some of the time.
+- **CI** repeats only the real-process test 10× per job. Every simulator row replays
+  identically from its seed, so repeating those adds time and no information.
+- **Open:** the smoke test once hung because its corruption step left no corruption in the
+  file. The cause is unknown, and it did not reproduce in 40 traced runs. The script now
+  verifies its corruption and puts a deadline on every wait.
+
 ---
 
 ## Phase 8 — Snapshots and compaction

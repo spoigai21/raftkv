@@ -90,6 +90,7 @@ if(RAFTKV_BUILD_TESTS)
         tests/kv_test.cpp
         tests/net_test.cpp
         tests/linearizability_test.cpp
+        tests/fault_matrix_test.cpp
     )
     target_link_libraries(raftkv_tests PRIVATE raftkv raftkv_warnings GTest::gtest_main
                                                nlohmann_json::nlohmann_json)

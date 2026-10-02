@@ -5,6 +5,7 @@
 // and when the reply arrives. An operation still outstanding when the run stops is recorded
 // with no return: it may or may not have taken effect, and the checker treats it that way.
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -35,6 +36,25 @@ public:
     }
 
     std::size_t size() const { return ops_.size(); }
+
+    // Operations that returned within [from, to), from every client or just `client`.
+    std::size_t returned_between(raft::Time from, raft::Time to, std::optional<raft::NodeId> client = {}) const {
+        std::size_t n = 0;
+        for (const auto& op : ops_) {
+            n += op.ret && *op.ret >= from && *op.ret < to && (!client || op.client == *client);
+        }
+        return n;
+    }
+
+    // Latencies of operations called within [from, to) that have returned, sorted.
+    std::vector<raft::Duration> latencies(raft::Time from, raft::Time to) const {
+        std::vector<raft::Duration> out;
+        for (const auto& op : ops_) {
+            if (op.ret && op.call >= from && op.call < to) out.push_back(*op.ret - op.call);
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    }
     std::size_t pending() const {
         std::size_t n = 0;
         for (const auto& op : ops_) n += !op.ret.has_value();

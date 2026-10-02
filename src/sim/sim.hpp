@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <utility>
 #include <set>
 #include <memory>
 #include <stdexcept>
@@ -32,6 +33,8 @@ struct Faults {
     // Nodes that partitions never cut off, e.g. clients when a test partitions only servers.
     // Loss and delay still apply to them.
     std::set<raft::NodeId> unpartitioned;
+    // Extra one-way delay on particular links, (from, to) -> delay: a slow or distant node.
+    std::map<std::pair<raft::NodeId, raft::NodeId>, raft::Duration> link_delay;
 };
 
 struct SimStats {

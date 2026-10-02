@@ -131,11 +131,13 @@ public:
     // Highest index any node has ever seen committed.
     raft::Index max_committed() const { return committed_.empty() ? 0 : committed_.rbegin()->first; }
 
-    // Every node is up and holds the same log, all of it committed and applied.
-    bool converged() {
+    // Every node is up and holds the same log, all of it committed and applied. With
+    // `allow_down`, nodes that are down (e.g. refused to start) are left out.
+    bool converged(bool allow_down = false) {
         const raft::Raft* first = nullptr;
         for (raft::NodeId id : ids_) {
             const raft::Raft* r = live(id);
+            if (r == nullptr && allow_down && !sim_.is_up(id)) continue;
             if (r == nullptr || r->commit_index() != r->last_log_index() ||
                 r->last_applied() != r->commit_index()) {
                 return false;
@@ -152,8 +154,8 @@ public:
         return true;
     }
 
-    bool wait_for_convergence(raft::Duration timeout) {
-        return sim_.run_until([this] { return converged(); }, sim_.now() + timeout);
+    bool wait_for_convergence(raft::Duration timeout, bool allow_down = false) {
+        return sim_.run_until([this, allow_down] { return converged(allow_down); }, sim_.now() + timeout);
     }
 
     // A client that proposes "<prefix><n>" to whoever leads, every `every`, until `until`.

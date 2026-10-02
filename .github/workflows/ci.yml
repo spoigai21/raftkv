@@ -80,6 +80,12 @@ jobs:
       - name: Test
         run: ctest --preset ${{ matrix.preset }}
 
+      # Phase 7 done-gate: repeat until a failure, 10 times. Only the real-process test can
+      # vary between runs; every simulator test replays identically from its seed, so
+      # repeating those in CI would add time and no information.
+      - name: Repeat the real-process test 10 times
+        run: ctest --preset ${{ matrix.preset }} -R '^cluster_smoke$' --repeat until-fail:10
+
       - name: Benchmark smoke test
         if: matrix.preset == 'rel'
         run: ./build/rel/raftkv_bench --benchmark_min_time=0.01s

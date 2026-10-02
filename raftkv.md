@@ -3,7 +3,7 @@
 What this project is, why it exists, and what counts as done.
 The step-by-step build is in `raftkv-implementation.md`.
 
-**Status:** Phase 6 (linearizability checking). The fault matrix is next.
+**Status:** Phase 7 (fault matrix). Snapshots and compaction are next; phases 0–7 are the planned clean stopping point.
 
 ---
 

@@ -25,7 +25,7 @@ rm -rf "$WORK"
 mkdir -p "$WORK/histories" "$WORK/viz"
 (cd "$SRC/tools/lincheck" && go build -o "$WORK/lincheck" .)
 
-RAFTKV_HISTORY_DIR="$WORK/histories" "$TESTS" --gtest_filter='Linearizability.*' --gtest_brief=1
+RAFTKV_HISTORY_DIR="$WORK/histories" "$TESTS" --gtest_filter='Linearizability.*:FaultMatrix.*' --gtest_brief=1
 N=$(find "$WORK/histories" -name '*.json' | wc -l | tr -d ' ')
 [[ $N -gt 0 ]] || { echo "lincheck: no histories were written" >&2; exit 1; }
 

@@ -8,13 +8,10 @@
 
 #include <gtest/gtest.h>
 
-#include <array>
-#include <functional>
-#include <map>
-
 #include "history.hpp"
 #include "raft_cluster.hpp"
 #include "test_seeds.hpp"
+#include "workload.hpp"
 
 namespace raftkv {
 namespace {
@@ -25,45 +22,8 @@ using test::ClusterOptions;
 using test::History;
 using test::RaftCluster;
 using test::seeds;
-
-constexpr std::array<const char*, 3> kKeys{"x", "y", "z"};
-
-// The workload's state. `next` issues a client's next operation; callbacks refer to it
-// through a weak_ptr so that it does not own itself (a leak LeakSanitizer would report).
-struct Workload {
-    std::shared_ptr<History> history = std::make_shared<History>();
-    std::shared_ptr<std::function<void(NodeId)>> next = std::make_shared<std::function<void(NodeId)>>();
-};
-
-// Starts the workload: every client runs operations back to back until `stop_issuing`.
-// The history fills in as the simulation runs. Keep the Workload alive for the whole run.
-Workload run_workload(RaftCluster& c, std::uint64_t seed, raft::Time stop_issuing) {
-    Workload w;
-    auto history = w.history;
-    auto rng = std::make_shared<sim::Rng>(seed * 7919 + 17);
-    auto counter = std::make_shared<std::map<NodeId, int>>();
-    std::weak_ptr<std::function<void(NodeId)>> next = w.next;
-    *w.next = [&c, history, rng, counter, next, stop_issuing](NodeId id) {
-        if (c.sim().now() >= stop_issuing) return;
-        const int n = (*counter)[id]++;
-        const std::string key = kKeys[rng->between(0, kKeys.size() - 1)];
-        const auto roll = rng->between(0, 9);
-        const kv::Op op = roll < 4 ? kv::Op::Get : roll < 7 ? kv::Op::Put : kv::Op::Append;
-        // Unique values, so the checker can tell every write apart.
-        const std::string value = op == kv::Op::Get ? "" : std::format("{}.{};", id, n);
-        const std::size_t i = history->invoke(id, op, key, value, c.sim().now());
-        auto done = [&c, history, next, i, id](const kv::Result& r) {
-            history->complete(i, r, c.sim().now());
-            if (auto issue = next.lock()) (*issue)(id);
-        };
-        auto& client = c.client(id);
-        if (op == kv::Op::Get) client.get(key, done);
-        else if (op == kv::Op::Put) client.put(key, value, done);
-        else client.append(key, value, done);
-    };
-    for (NodeId id : c.client_ids()) (*w.next)(id);
-    return w;
-}
+using test::Workload;
+using test::run_workload;
 
 // Faults for 10 s, then everything heals and every client's last operation completes, so
 // the whole history has returned.
@@ -76,10 +36,7 @@ TEST(Linearizability, HealedRunsProduceCompleteHistories) {
         const Workload w = run_workload(c, seed, raft::Time{10s});
         const auto& history = w.history;
         c.sim().run_until(raft::Time{10s});
-        ASSERT_TRUE(c.sim().run_until([&] {
-            for (NodeId id : c.client_ids()) if (c.client(id).busy()) return false;
-            return true;
-        }, raft::Time{30s})) << c.context();
+        ASSERT_TRUE(test::wait_for_clients_idle(c, raft::Time{30s})) << c.context();
         ASSERT_TRUE(c.violations().empty()) << testing::PrintToString(c.violations()) << c.context();
         EXPECT_GT(history->size(), 100u);
         EXPECT_EQ(history->pending(), 0u);
