@@ -16,7 +16,9 @@ set -euo pipefail
 RAFTKVD=$1
 RAFTKVCTL=$2
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/raftkv-smoke-XXXXXX")
-BASE=$(( 20000 + (RANDOM % 20000) ))
+# Below every OS's ephemeral range (Linux 32768+, macOS 49152+), so an outgoing connection
+# can never be holding a port a server is about to listen on.
+BASE=$(( 20000 + (RANDOM % 12000) ))
 CLUSTER=$WORK/cluster.json
 printf '{"1":"127.0.0.1:%d","2":"127.0.0.1:%d","3":"127.0.0.1:%d"}\n' $BASE $((BASE+1)) $((BASE+2)) > "$CLUSTER"
 declare -a PID=(0 0 0 0)
@@ -29,6 +31,17 @@ cleanup() {
 fail() {
     echo "FAIL: $*" >&2
     for i in 1 2 3; do echo "--- node $i log (tail) ---" >&2; tail -n 30 "$WORK/node$i.log" >&2 || true; done
+    # In GitHub Actions, also raise an annotation: unlike job logs, annotations can be read
+    # through the public API, so a CI-only failure still leaves evidence.
+    if [[ -n ${GITHUB_ACTIONS:-} ]]; then
+        local detail="$*"
+        # Workflow commands need %, newline and CR escaped; a missing log must not end the script.
+        for i in 1 2 3; do
+            detail+="%0A--- node $i ---%0A$( { tail -n 8 "$WORK/node$i.log" 2>/dev/null || true; } |
+                awk '{ gsub(/%/, "%25"); gsub(/\r/, "%0D"); printf "%s%%0A", $0 }')"
+        done
+        echo "::error title=cluster_smoke failed::$detail"
+    fi
     exit 1
 }
 trap cleanup EXIT
