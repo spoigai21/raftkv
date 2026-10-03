@@ -1,13 +1,18 @@
 #include "kv/client.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <format>
 #include <stdexcept>
 
 namespace raftkv::kv {
 
 Client::Client(ClientConfig config, raft::Env& env)
-    : config_(std::move(config)), env_(env), client_id_(env.random() | 1) {
+    : config_(std::move(config)),
+      env_(env),
+      client_id_(env.random() | 1),
+      base_timeout_(config_.initial_timeout),
+      timeout_(config_.initial_timeout) {
     if (config_.servers.empty()) throw std::invalid_argument("kv::Client needs at least one server");
     target_ = static_cast<std::size_t>(env_.random() % config_.servers.size());
 }
@@ -27,6 +32,9 @@ void Client::start(Op op, std::string key, std::string value, Callback done) {
     outstanding_ = Command{.client_id = client_id_, .seq = next_seq_++, .op = op,
                            .key = std::move(key), .value = std::move(value)};
     done_ = std::move(done);
+    retried_ = false;
+    timeouts_on_target_ = 0;
+    timeout_ = base_timeout_;
     send_now();
 }
 
@@ -40,6 +48,8 @@ void Client::on_message(const raft::Message& m) {
     if (!outstanding_ || r->client_id != client_id_ || r->seq != outstanding_->seq) return;
 
     if (r->status == Status::Ok) {
+        // Karn's rule: only a request that was never resent gives an unambiguous sample.
+        if (!retried_) record_rtt(env_.now() - sent_at_);
         cancel_timers();
         outstanding_.reset();
         ++stats_.completed;
@@ -50,6 +60,9 @@ void Client::on_message(const raft::Message& m) {
     }
 
     ++stats_.not_leader;
+    retried_ = true;
+    timeouts_on_target_ = 0;
+    timeout_ = base_timeout_;
     const auto& servers = config_.servers;
     if (r->leader_hint && *r->leader_hint != m.from) {
         if (auto it = std::ranges::find(servers, *r->leader_hint); it != servers.end()) {
@@ -69,7 +82,18 @@ void Client::on_timer(raft::TimerId id, raft::TimerTag tag) {
     if (tag == kTimeout && timeout_timer_ == id) {
         timeout_timer_.reset();
         ++stats_.timeouts;
-        try_next_server();
+        retried_ = true;
+        // One resend to the same server first, with the timeout doubled: the likeliest cause is
+        // a lost message, and the leader is usually still the leader. A second timeout there
+        // moves on to the next server, back at the normal timeout: carrying the doubled one
+        // along would make a failover wait far longer than the election.
+        if (++timeouts_on_target_ >= 2) {
+            try_next_server();
+            timeouts_on_target_ = 0;
+            timeout_ = base_timeout_;
+        } else {
+            timeout_ = std::min(timeout_ * 2, config_.max_timeout);
+        }
         send_now();
     } else if (tag == kBackoff && backoff_timer_ == id) {
         backoff_timer_.reset();
@@ -79,8 +103,23 @@ void Client::on_timer(raft::TimerId id, raft::TimerTag tag) {
 
 void Client::send_now() {
     cancel_timers();
+    sent_at_ = env_.now();
     env_.send(encode_request(config_.servers[target_], *outstanding_));
-    timeout_timer_ = env_.after(config_.request_timeout, kTimeout);
+    timeout_timer_ = env_.after(timeout_, kTimeout);
+}
+
+void Client::record_rtt(raft::Duration sample) {
+    // RFC 6298 §2: alpha = 1/8, beta = 1/4, timeout = srtt + 4 * rttvar.
+    const auto r = static_cast<double>(sample.count());
+    if (!srtt_us_) {
+        srtt_us_ = r;
+        rttvar_us_ = r / 2;
+    } else {
+        rttvar_us_ = 0.75 * rttvar_us_ + 0.25 * std::abs(*srtt_us_ - r);
+        srtt_us_ = 0.875 * *srtt_us_ + 0.125 * r;
+    }
+    const auto t = raft::Duration(static_cast<raft::Duration::rep>(*srtt_us_ + 4 * rttvar_us_));
+    base_timeout_ = std::clamp(t, config_.min_timeout, config_.max_timeout);
 }
 
 void Client::try_next_server() { target_ = (target_ + 1) % config_.servers.size(); }

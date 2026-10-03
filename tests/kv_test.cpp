@@ -122,10 +122,11 @@ TEST(Kv, AppendSurvivesLeaderFailoverWithoutDuplication) { append_survives_failo
 TEST(Kv, AppendSurvivesLeaderFailoverWithSnapshots) { append_survives_failover(2); }
 
 // A leader that is deposed while a request is pending answers NotLeader at once, instead of
-// leaving the client to time out.
+// leaving the client to time out. (A fixed 2 s client timeout, so that only the NotLeader
+// reply can end the wait before the partition heals.)
 TEST(Kv, DeposedLeaderFailsPendingRequestsPromptly) {
     for (std::uint64_t seed : seeds(20)) {
-        RaftCluster c(seed, 3, ClusterOptions{.kv = true, .clients = 1});
+        RaftCluster c(seed, 3, ClusterOptions{.kv = true, .clients = 1, .client_timeout = 2s});
         c.sim().start();
         ASSERT_TRUE(c.wait_for_leader(2s));
         ASSERT_TRUE(put(c, 101, "warmup", "x"));   // the client now knows the leader

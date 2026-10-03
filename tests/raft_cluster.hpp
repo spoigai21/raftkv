@@ -33,6 +33,7 @@ struct ClusterOptions {
     bool kv = false;   // servers are kv::Server (Raft + state machine) instead of bare Raft
     int clients = 0;   // kv::Client nodes, ids 101, 102, ...; partitions never cut them off
     raft::Index snapshot_every = 0;   // RaftConfig::snapshot_every (KV servers only); 0: never
+    std::optional<raft::Duration> client_timeout;   // a fixed client timeout instead of adaptive
 };
 
 class RaftCluster {
@@ -279,7 +280,9 @@ private:
     // so it starts empty and Raft replays the log into it.
     std::unique_ptr<raft::Node> make_node(raft::NodeId me, raft::Env& env) {
         if (std::ranges::find(client_ids_, me) != client_ids_.end()) {
-            return std::make_unique<kv::Client>(kv::ClientConfig{.servers = ids_}, env);
+            kv::ClientConfig cc{.servers = ids_};
+            if (options_.client_timeout) cc.initial_timeout = cc.min_timeout = cc.max_timeout = *options_.client_timeout;
+            return std::make_unique<kv::Client>(cc, env);
         }
         raft::RaftConfig cfg{.id = me, .peers = {}};
         for (raft::NodeId p : ids_) if (p != me) cfg.peers.push_back(p);

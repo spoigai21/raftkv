@@ -28,7 +28,9 @@ using test::run_workload;
 // Faults for 10 s, then everything heals and every client's last operation completes, so
 // the whole history has returned.
 TEST(Linearizability, HealedRunsProduceCompleteHistories) {
-    for (std::uint64_t seed : test::chaos_seeds(100)) {
+    std::size_t total = 0;
+    const auto runs = test::chaos_seed_count(100);
+    for (std::uint64_t seed : seeds(runs)) {
         RaftCluster c(seed, 5, ClusterOptions{.kv = true, .clients = 4});
         c.quiet();
         c.schedule_chaos(seed, 10s);
@@ -38,9 +40,14 @@ TEST(Linearizability, HealedRunsProduceCompleteHistories) {
         c.sim().run_until(raft::Time{10s});
         ASSERT_TRUE(test::wait_for_clients_idle(c, raft::Time{30s})) << c.context();
         ASSERT_TRUE(c.violations().empty()) << testing::PrintToString(c.violations()) << c.context();
-        EXPECT_GT(history->size(), 100u);
+        // Heavy chaos can keep a run to a few dozen operations; the total is what must be large.
+        EXPECT_GT(history->size(), 0u);
+        total += history->size();
         EXPECT_EQ(history->pending(), 0u);
         history->write_if_requested(seed, "healed");
+    }
+    if (std::getenv("RAFTKV_SEED") == nullptr) {
+        EXPECT_GT(total, 200u * runs) << "the workload made little progress across all seeds";
     }
 }
 
