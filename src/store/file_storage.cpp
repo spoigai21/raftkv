@@ -21,6 +21,10 @@ namespace {
 constexpr const char* kLogFile = "log";
 constexpr const char* kHardStateFile = "hard_state";
 constexpr const char* kHardStateTmp = "hard_state.tmp";
+constexpr const char* kSnapshotFile = "snapshot";
+constexpr const char* kSnapshotTmp = "snapshot.tmp";
+constexpr const char* kLogTmp = "log.tmp";
+constexpr std::uint32_t kSnapshotMagic = 0x4e53'4b52;   // "RKSN"
 constexpr std::uint32_t kHardStateMagic = 0x5348'4b52;   // "RKHS"
 constexpr std::size_t kHardStateSize = 4 + 8 + 1 + 4 + 4;
 
@@ -112,25 +116,85 @@ tl::expected<void, std::string> decode_hard_state(std::span<const std::byte> in,
     return {};
 }
 
-// Replays log records into a state, checking that entries continue the log without gaps.
+// Replays log records into a state. The log may start at index 1 or, once compacted, right
+// after the snapshot; either way entries must follow each other without gaps. Entries the
+// snapshot covers are dropped (they are there if a crash came between saving the snapshot
+// and rewriting the log).
 tl::expected<void, std::string> replay(const std::vector<LogRecord>& records, raft::PersistentState& state) {
+    const raft::Index covered = state.snapshot ? state.snapshot->last_included_index : 0;
+    std::vector<raft::LogEntry> log;
+    std::optional<raft::Index> next;   // the index the next entry must have
     for (const LogRecord& r : records) {
         if (const auto* e = std::get_if<raft::LogEntry>(&r)) {
-            if (e->index != state.log.size() + 1) {
-                return tl::unexpected(std::format("log entry {} does not follow entry {}", e->index,
-                                                  state.log.size()));
+            if (!next) {
+                if (e->index == 0 || e->index > covered + 1) {
+                    return tl::unexpected(std::format("log starts at entry {}, after a gap (snapshot ends at {})",
+                                                      e->index, covered));
+                }
+            } else if (e->index != *next) {
+                return tl::unexpected(std::format("log entry {} does not follow entry {}", e->index, *next - 1));
             }
-            state.log.push_back(*e);
+            log.push_back(*e);
+            next = e->index + 1;
         } else {
             const raft::Index from = std::get<TruncateFrom>(r).index;
-            if (from == 0 || from > state.log.size() + 1) {
-                return tl::unexpected(std::format("truncate-from {} is outside a log of {} entries",
-                                                  from, state.log.size()));
+            const raft::Index first = log.empty() ? (next ? *next : 1) : log.front().index;
+            if (from == 0 || from < first || (next && from > *next)) {
+                return tl::unexpected(std::format("truncate-from {} is outside the log", from));
             }
-            state.log.resize(static_cast<std::size_t>(from - 1));
+            std::erase_if(log, [from](const raft::LogEntry& x) { return x.index >= from; });
+            next = from;
         }
     }
+    std::erase_if(log, [covered](const raft::LogEntry& x) { return x.index <= covered; });
+    state.log = std::move(log);
     return {};
+}
+
+// snapshot: [magic u32][last_included_index u64][last_included_term u64][data length u64]
+//           [data][crc32 of all the preceding bytes u32]
+std::vector<std::byte> encode_snapshot(const raft::Snapshot& snap) {
+    std::vector<std::byte> out;
+    put(out, kSnapshotMagic, 4);
+    put(out, snap.last_included_index, 8);
+    put(out, snap.last_included_term, 8);
+    put(out, snap.data.size(), 8);
+    const auto data = std::as_bytes(std::span(snap.data));
+    out.insert(out.end(), data.begin(), data.end());
+    put(out, crc32(out), 4);
+    return out;
+}
+
+tl::expected<raft::Snapshot, std::string> decode_snapshot(std::span<const std::byte> in) {
+    constexpr std::size_t kFixed = 4 + 8 + 8 + 8;
+    if (in.size() < kFixed + 4 || get(in, 0, 4) != kSnapshotMagic) {
+        return tl::unexpected(std::string("snapshot is corrupt"));
+    }
+    const std::uint64_t len = get(in, 20, 8);
+    if (len != in.size() - kFixed - 4 || crc32(in.first(in.size() - 4)) != get(in, in.size() - 4, 4)) {
+        return tl::unexpected(std::string("snapshot is corrupt"));
+    }
+    const auto data = in.subspan(kFixed, static_cast<std::size_t>(len));
+    return raft::Snapshot{.last_included_index = get(in, 4, 8), .last_included_term = get(in, 12, 8),
+                          .data = std::string(reinterpret_cast<const char*>(data.data()), data.size())};
+}
+
+// Writes `bytes` to dir/tmp_name, makes it durable, and renames it over dir/name.
+void replace_file(const fs::path& dir, const char* name, const char* tmp_name, std::span<const std::byte> bytes,
+                  bool durable) {
+    const fs::path tmp = dir / tmp_name;
+    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) fail("open " + tmp.string());
+    try {
+        write_all(fd, bytes, tmp.string());
+        if (durable) full_sync(fd, tmp.string());
+    } catch (...) {
+        ::close(fd);
+        throw;
+    }
+    ::close(fd);
+    if (::rename(tmp.c_str(), (dir / name).c_str()) != 0) fail("rename " + tmp.string());
+    if (durable) sync_dir(dir);   // makes the rename itself durable
 }
 
 }  // namespace
@@ -139,13 +203,22 @@ tl::expected<std::unique_ptr<FileStorage>, std::string> FileStorage::open(const 
     std::error_code ec;
     fs::create_directories(dir, ec);
     if (ec) return tl::unexpected(std::format("create {}: {}", dir.string(), ec.message()));
-    fs::remove(dir / kHardStateTmp, ec);   // a leftover from a crash mid-save; never renamed
+    // Leftovers from a crash mid-save, never renamed into place.
+    for (const char* tmp : {kHardStateTmp, kSnapshotTmp, kLogTmp}) fs::remove(dir / tmp, ec);
 
     raft::PersistentState state;
     if (fs::exists(dir / kHardStateFile)) {
         auto bytes = read_file(dir / kHardStateFile);
         if (!bytes) return tl::unexpected(bytes.error());
         if (auto ok = decode_hard_state(*bytes, state); !ok) return tl::unexpected(ok.error());
+    }
+
+    if (fs::exists(dir / kSnapshotFile)) {
+        auto bytes = read_file(dir / kSnapshotFile);
+        if (!bytes) return tl::unexpected(bytes.error());
+        auto snap = decode_snapshot(*bytes);
+        if (!snap) return tl::unexpected(snap.error());
+        state.snapshot = std::move(*snap);
     }
 
     const fs::path log_path = dir / kLogFile;
@@ -192,19 +265,8 @@ FileStorage::~FileStorage() {
 }
 
 void FileStorage::save_hard_state(raft::Term current_term, std::optional<raft::NodeId> voted_for) {
-    const fs::path tmp = dir_ / kHardStateTmp;
-    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-    if (fd < 0) fail("open " + tmp.string());
-    try {
-        write_all(fd, encode_hard_state(current_term, voted_for), tmp.string());
-        sync_file(fd, tmp.string());
-    } catch (...) {
-        ::close(fd);
-        throw;
-    }
-    ::close(fd);
-    if (::rename(tmp.c_str(), (dir_ / kHardStateFile).c_str()) != 0) fail("rename " + tmp.string());
-    sync_directory();   // makes the rename itself durable
+    replace_file(dir_, kHardStateFile, kHardStateTmp, encode_hard_state(current_term, voted_for),
+                 sync_mode_ == Sync::Durable);
     state_.current_term = current_term;
     state_.voted_for = voted_for;
 }
@@ -227,12 +289,28 @@ void FileStorage::truncate_suffix(raft::Index from) {
 
 void FileStorage::sync() { sync_file(log_fd_, (dir_ / kLogFile).string()); }
 
-void FileStorage::sync_file(int fd, const std::string& what) const {
-    if (sync_mode_ == Sync::Durable) full_sync(fd, what);
+void FileStorage::save_snapshot(const raft::Snapshot& snapshot) {
+    const bool durable = sync_mode_ == Sync::Durable;
+    // 1. The snapshot, durably. From here a crash recovers the snapshot plus the old log,
+    //    whose covered entries replay() drops.
+    replace_file(dir_, kSnapshotFile, kSnapshotTmp, encode_snapshot(snapshot), durable);
+    state_.snapshot = snapshot;
+    std::erase_if(state_.log, [&](const raft::LogEntry& e) { return e.index <= snapshot.last_included_index; });
+
+    // 2. Rewrite the log with only the entries after the snapshot, and swap it in. This is
+    //    what keeps the log bounded.
+    std::vector<std::byte> bytes;
+    for (const raft::LogEntry& e : state_.log) encode(e, bytes);
+    replace_file(dir_, kLogFile, kLogTmp, bytes, durable);
+    const fs::path log_path = dir_ / kLogFile;
+    const int fd = ::open(log_path.c_str(), O_RDWR | O_APPEND | O_CLOEXEC);
+    if (fd < 0) fail("reopen " + log_path.string());
+    ::close(log_fd_);
+    log_fd_ = fd;
 }
 
-void FileStorage::sync_directory() const {
-    if (sync_mode_ == Sync::Durable) sync_dir(dir_);
+void FileStorage::sync_file(int fd, const std::string& what) const {
+    if (sync_mode_ == Sync::Durable) full_sync(fd, what);
 }
 
 void FileStorage::write_log(std::span<const std::byte> bytes) {

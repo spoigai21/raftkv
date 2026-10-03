@@ -32,6 +32,7 @@ using namespace std::chrono_literals;
 struct ClusterOptions {
     bool kv = false;   // servers are kv::Server (Raft + state machine) instead of bare Raft
     int clients = 0;   // kv::Client nodes, ids 101, 102, ...; partitions never cut them off
+    raft::Index snapshot_every = 0;   // RaftConfig::snapshot_every (KV servers only); 0: never
 };
 
 class RaftCluster {
@@ -147,8 +148,20 @@ public:
                 continue;
             }
             if (r->last_log_index() != first->last_log_index()) return false;
-            for (raft::Index i = 1; i <= r->last_log_index(); ++i) {
+            // Compare the entries both still hold; what a snapshot covers is compared below,
+            // through the state machines.
+            const raft::Index from = std::max(r->snapshot_index(), first->snapshot_index()) + 1;
+            for (raft::Index i = from; i <= r->last_log_index(); ++i) {
                 if (!(*r->entry_at(i) == *first->entry_at(i))) return false;
+            }
+        }
+        if (options_.kv) {   // same data and same dedup table everywhere, snapshots or not
+            const kv::Server* ref = nullptr;
+            for (raft::NodeId id : ids_) {
+                const kv::Server* sv = live(id) ? server(id) : nullptr;
+                if (sv == nullptr) continue;
+                if (ref != nullptr && !(sv->state() == ref->state())) return false;
+                ref = sv;
             }
         }
         return true;
@@ -270,7 +283,9 @@ private:
         }
         raft::RaftConfig cfg{.id = me, .peers = {}};
         for (raft::NodeId p : ids_) if (p != me) cfg.peers.push_back(p);
+        cfg.snapshot_every = options_.snapshot_every;
         applied_[me].clear();
+        last_applied_[me] = 0;
         commit_checked_[me] = 0;
         auto observe = [this, me](const raft::LogEntry& e) { on_apply(me, e); };
         if (options_.kv) return std::make_unique<kv::Server>(cfg, env, observe);
@@ -278,11 +293,12 @@ private:
     }
 
     void on_apply(raft::NodeId id, const raft::LogEntry& e) {
-        auto& mine = applied_[id];
-        if (e.index != mine.size() + 1) {
-            violation(std::format("node {} applied index {} after {}", id, e.index, mine.size()));
-        }
-        mine.push_back(e);
+        // In order, exactly once; a restored or installed snapshot counts as applied.
+        raft::Index& last = last_applied_[id];
+        const raft::Index expected = std::max(last, raft(id)->snapshot_index()) + 1;
+        if (e.index != expected) violation(std::format("node {} applied index {}, expected {}", id, e.index, expected));
+        last = e.index;
+        applied_[id].push_back(e);
         // State Machine Safety: nobody ever applies a different entry at the same index.
         auto [it, fresh] = applied_at_.emplace(e.index, e);
         if (!fresh && !(it->second == e)) {
@@ -316,6 +332,7 @@ private:
             // Committed entries never change: record each index once any node commits it, and
             // every later commit of that index must be the same entry.
             for (raft::Index i = commit_checked_[id] + 1; i <= r->commit_index(); ++i) {
+                if (i <= r->snapshot_index()) continue;   // covered by a snapshot; nothing to read
                 const raft::LogEntry* e = r->entry_at(i);
                 if (e == nullptr) {
                     violation(std::format("node {} committed {} past its log end", id, i));
@@ -337,7 +354,7 @@ private:
             // old term after newer terms have committed more, and then step down at once.
             if (r->role() == raft::Role::Leader && checked_leaders_.emplace(id, term).second) {
                 for (const auto& [i, e] : committed_) {
-                    if (commit_term_.at(i) >= term) continue;
+                    if (i <= r->snapshot_index() || commit_term_.at(i) >= term) continue;
                     const raft::LogEntry* mine = r->entry_at(i);
                     if (mine == nullptr || !(*mine == e)) {
                         violation(std::format("leader {} of term {} lacks committed index {}", id,
@@ -376,6 +393,7 @@ private:
     std::map<raft::NodeId, raft::Index> commit_checked_;
     std::set<std::pair<raft::NodeId, raft::Term>> checked_leaders_;
     std::map<raft::NodeId, std::vector<raft::LogEntry>> applied_;
+    std::map<raft::NodeId, raft::Index> last_applied_;
     std::map<raft::Index, raft::LogEntry> applied_at_;
     std::vector<std::string> violations_;
 };

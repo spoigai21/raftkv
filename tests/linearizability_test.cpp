@@ -72,5 +72,24 @@ TEST(Linearizability, CutOffRunsLeaveOperationsUnresolved) {
     }
 }
 
+// Phase 8: the same workload and faults with snapshots every 25 entries, so lagging nodes
+// catch up by InstallSnapshot and restarted ones restore from a snapshot. A snapshot that
+// lost a write, or forgot the dedup table, shows up here as a non-linearizable history.
+TEST(Linearizability, HealedRunsWithFrequentSnapshots) {
+    for (std::uint64_t seed : test::chaos_seeds(100)) {
+        RaftCluster c(seed, 5, ClusterOptions{.kv = true, .clients = 4, .snapshot_every = 25});
+        c.quiet();
+        c.schedule_chaos(seed, 10s);
+        c.sim().start();
+        const Workload w = run_workload(c, seed, raft::Time{10s});
+        c.sim().run_until(raft::Time{10s});
+        ASSERT_TRUE(test::wait_for_clients_idle(c, raft::Time{30s})) << c.context();
+        ASSERT_TRUE(c.violations().empty()) << testing::PrintToString(c.violations()) << c.context();
+        EXPECT_GT(c.raft(1) ? c.raft(1)->snapshot_index() : 1u, 0u) << "no snapshot was ever taken";
+        EXPECT_EQ(w.history->pending(), 0u);
+        w.history->write_if_requested(seed, "snapshots");
+    }
+}
+
 }  // namespace
 }  // namespace raftkv

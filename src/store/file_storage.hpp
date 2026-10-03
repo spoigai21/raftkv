@@ -22,7 +22,9 @@ public:
 // holds two files:
 //
 //   hard_state  current term and vote; replaced atomically (write tmp, fsync, rename, fsync dir)
-//   log         append-only records (see log_codec.hpp): entries and truncate-from markers
+//   snapshot    the latest snapshot, checksummed; replaced atomically the same way
+//   log         append-only records (see log_codec.hpp): entries and truncate-from markers.
+//               Rewritten (atomically) without the covered entries after each snapshot.
 //
 // save_hard_state() is durable when it returns; append() and truncate_suffix() become
 // durable at the next sync().
@@ -49,6 +51,7 @@ public:
     void append(std::span<const raft::LogEntry> entries) override;
     void truncate_suffix(raft::Index from) override;
     void sync() override;
+    void save_snapshot(const raft::Snapshot& snapshot) override;
     raft::PersistentState load() const override { return state_; }
 
     // Whether open() found and cut off a torn tail.
@@ -58,7 +61,6 @@ private:
     FileStorage(std::filesystem::path dir, int log_fd, raft::PersistentState state, bool torn, Sync sync);
     void write_log(std::span<const std::byte> bytes);
     void sync_file(int fd, const std::string& what) const;
-    void sync_directory() const;
 
     std::filesystem::path dir_;
     Sync sync_mode_ = Sync::Durable;

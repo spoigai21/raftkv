@@ -14,8 +14,8 @@ const char* to_string(Role r) {
     return "?";
 }
 
-Raft::Raft(RaftConfig config, Env& env, ApplyFn apply)
-    : config_(std::move(config)), env_(env), apply_(std::move(apply)) {
+Raft::Raft(RaftConfig config, Env& env, ApplyFn apply, SnapshotHooks snapshots)
+    : config_(std::move(config)), env_(env), apply_(std::move(apply)), snapshots_(std::move(snapshots)) {
     log_.push_back(LogEntry{.term = 0, .index = 0, .command = {}});
 }
 
@@ -24,13 +24,21 @@ void Raft::on_start() {
     current_term_ = saved.current_term;
     voted_for_ = saved.voted_for;
     log_.resize(1);
+    if (saved.snapshot) {
+        // The snapshot is of committed state, so everything it covers is committed and,
+        // once restored, applied.
+        compact_to(*saved.snapshot);
+        if (snapshots_.restore) snapshots_.restore(saved.snapshot->data);
+        commit_index_ = last_applied_ = snapshot_index();
+    }
     log_.insert(log_.end(), saved.log.begin(), saved.log.end());
     role_ = Role::Follower;
     // commit_index and last_applied restart at 0: the leader tells us how far is committed,
     // and the state machine is rebuilt by applying from the start (snapshots come in Phase 8).
-    env_.trace(std::format("boot term={} voted_for={} last={}/{}", current_term_,
+    env_.trace(std::format("boot term={} voted_for={} last={}/{}{}", current_term_,
                            voted_for_ ? std::to_string(*voted_for_) : "-", last_log_index(),
-                           last_log_term()));
+                           last_log_term(),
+                           snapshot_ ? std::format(" snapshot={}", snapshot_index()) : std::string()));
     reset_election_timer();
 }
 
@@ -120,16 +128,18 @@ void Raft::handle(NodeId from, const AppendEntries& r) {
     }
     reset_election_timer();
 
-    // Consistency check: we must hold prev_log_index with the same term.
+    // Consistency check: we must hold prev_log_index with the same term. Entries our snapshot
+    // covers are committed, so they match the leader's by Leader Completeness.
     const auto prev_term = term_at(r.prev_log_index);
-    if (!prev_term || *prev_term != r.prev_log_term) {
+    const bool prev_in_snapshot = r.prev_log_index < snapshot_index();
+    if (!prev_in_snapshot && (!prev_term || *prev_term != r.prev_log_term)) {
         AppendEntriesReply fail{.term = current_term_, .success = false};
         if (!prev_term) {
             fail.conflict_index = last_log_index() + 1;   // our log is too short
         } else {
             fail.conflict_term = *prev_term;             // skip our whole conflicting term
             Index first = r.prev_log_index;
-            while (first > 1 && log_[first - 1].term == *prev_term) --first;
+            while (first > snapshot_index() + 1 && at(first - 1).term == *prev_term) --first;
             fail.conflict_index = first;
         }
         send(from, fail);
@@ -141,6 +151,7 @@ void Raft::handle(NodeId from, const AppendEntries& r) {
     // shorter AppendEntries can never truncate entries a newer one delivered.
     std::vector<LogEntry> fresh;
     for (const LogEntry& e : r.entries) {
+        if (e.index <= snapshot_index()) continue;   // already in the snapshot
         const auto have = term_at(e.index);
         if (have && *have == e.term) continue;
         if (have) truncate_from(e.index);
@@ -173,8 +184,8 @@ void Raft::handle(NodeId from, const AppendEntriesReply& r) {
         if (r.conflict_term != 0) {
             // If we hold entries from the follower's conflicting term, resume after our last
             // one; otherwise skip the follower's whole term.
-            for (Index i = last_log_index(); i > 0 && log_[i].term >= r.conflict_term; --i) {
-                if (log_[i].term == r.conflict_term) {
+            for (Index i = last_log_index(); i > snapshot_index() && at(i).term >= r.conflict_term; --i) {
+                if (at(i).term == r.conflict_term) {
                     retry = i + 1;
                     break;
                 }
@@ -186,15 +197,72 @@ void Raft::handle(NodeId from, const AppendEntriesReply& r) {
     if (next <= last_log_index()) replicate_to(from);   // keep going until it has everything
 }
 
+// ---- InstallSnapshot ---------------------------------------------------------------------
+
+void Raft::handle(NodeId from, const InstallSnapshot& r) {
+    if (r.term < current_term_) {
+        send(from, InstallSnapshotReply{.term = current_term_, .match_index = 0});
+        return;
+    }
+    if (r.term > current_term_) step_down(r.term);
+    if (role_ == Role::Candidate) role_ = Role::Follower;
+    leader_ = from;
+    reset_election_timer();
+
+    const Snapshot& s = r.snapshot;
+    if (s.last_included_index <= commit_index_) {
+        // We already have all of it, committed; a stale or repeated snapshot.
+        send(from, InstallSnapshotReply{.term = current_term_, .match_index = s.last_included_index});
+        return;
+    }
+
+    // Figure 13: if we hold the snapshot's last entry with the same term, the entries after
+    // it are still good; otherwise our whole log is superseded.
+    const auto have = term_at(s.last_included_index);
+    const bool keep_suffix = have && *have == s.last_included_term;
+    env_.storage().save_snapshot(s);   // durable before we ack, and drops covered entries
+    if (!keep_suffix) {
+        env_.storage().truncate_suffix(s.last_included_index + 1);
+        env_.storage().sync();
+        log_.resize(1);
+    }
+    compact_to(s);
+    if (snapshots_.restore) snapshots_.restore(s.data);
+    commit_index_ = std::max(commit_index_, s.last_included_index);
+    last_applied_ = s.last_included_index;
+    env_.trace(std::format("installed snapshot {}/{} from {}{}", s.last_included_index, s.last_included_term, from,
+                           keep_suffix ? ", kept the log after it" : ""));
+    send(from, InstallSnapshotReply{.term = current_term_, .match_index = s.last_included_index});
+}
+
+void Raft::handle(NodeId from, const InstallSnapshotReply& r) {
+    if (r.term > current_term_) {
+        step_down(r.term);
+        return;
+    }
+    if (role_ != Role::Leader || r.term != current_term_) return;
+    Index& match = match_index_[from];
+    Index& next = next_index_[from];
+    match = std::max(match, r.match_index);
+    next = std::max(next, match + 1);
+    advance_commit_index();
+    if (next <= last_log_index()) replicate_to(from);
+}
+
 void Raft::replicate_to(NodeId peer) {
     const Index next = next_index_[peer];
+    if (next <= snapshot_index()) {
+        // What the follower needs next is compacted away: send the snapshot instead.
+        send(peer, InstallSnapshot{.term = current_term_, .leader_id = config_.id, .snapshot = *snapshot_});
+        return;
+    }
     const Index prev = next - 1;
     AppendEntries ae{.term = current_term_, .leader_id = config_.id, .prev_log_index = prev,
-                     .prev_log_term = log_[prev].term, .entries = {},
+                     .prev_log_term = *term_at(prev), .entries = {},
                      .leader_commit = commit_index_};
     const Index end = std::min(last_log_index(), prev + config_.max_entries_per_append);
-    ae.entries.assign(log_.begin() + static_cast<std::ptrdiff_t>(next),
-                      log_.begin() + static_cast<std::ptrdiff_t>(end) + 1);
+    ae.entries.assign(log_.begin() + static_cast<std::ptrdiff_t>(next - snapshot_index()),
+                      log_.begin() + static_cast<std::ptrdiff_t>(end - snapshot_index()) + 1);
     send(peer, ae);
 }
 
@@ -208,7 +276,7 @@ void Raft::advance_commit_index() {
     for (Index n = last_log_index(); n > commit_index_; --n) {
         // §5.4.2: only an entry from the current term is committed by counting replicas.
         // Earlier entries are then committed indirectly, by the Log Matching property.
-        if (log_[n].term != current_term_) break;
+        if (at(n).term != current_term_) break;
         std::size_t stored = 0;
         for (const auto& [id, m] : match_index_) stored += m >= n;
         if (stored >= majority()) {
@@ -228,8 +296,29 @@ void Raft::set_commit_index(Index index) {
 void Raft::apply_committed() {
     while (last_applied_ < commit_index_) {
         ++last_applied_;
-        if (apply_) apply_(log_[last_applied_]);
+        if (apply_) apply_(at(last_applied_));
     }
+    maybe_take_snapshot();
+}
+
+void Raft::maybe_take_snapshot() {
+    if (config_.snapshot_every == 0 || !snapshots_.take) return;
+    if (last_applied_ - snapshot_index() < config_.snapshot_every) return;
+    // The state machine has applied exactly up to last_applied_, in this same event.
+    Snapshot s{.last_included_index = last_applied_, .last_included_term = at(last_applied_).term,
+               .data = snapshots_.take()};
+    env_.storage().save_snapshot(s);
+    compact_to(s);
+    env_.trace(std::format("snapshot at {}/{} ({} bytes), log now {} entries", s.last_included_index,
+                           s.last_included_term, s.data.size(), log_.size() - 1));
+}
+
+void Raft::compact_to(const Snapshot& s) {
+    // Drop entries up to and including the snapshot's last one; it becomes the sentinel.
+    const Index drop = std::min<Index>(s.last_included_index - snapshot_index(), log_.size() - 1);
+    log_.erase(log_.begin() + 1, log_.begin() + 1 + static_cast<std::ptrdiff_t>(drop));
+    log_[0] = LogEntry{.term = s.last_included_term, .index = s.last_included_index, .command = {}};
+    snapshot_ = s;
 }
 
 // ---- role changes ------------------------------------------------------------------------
@@ -307,7 +396,7 @@ void Raft::truncate_from(Index index) {
     // those. The harness checks that this holds.
     env_.trace(std::format("truncate log from {} (was last={})", index, last_log_index()));
     env_.storage().truncate_suffix(index);
-    log_.resize(static_cast<std::size_t>(index));
+    log_.resize(static_cast<std::size_t>(index - snapshot_index()));
 }
 
 // ---- helpers -----------------------------------------------------------------------------
@@ -331,14 +420,18 @@ void Raft::persist_hard_state() { env_.storage().save_hard_state(current_term_, 
 void Raft::send(NodeId to, const Rpc& rpc) { env_.send(encode(to, rpc)); }
 
 const LogEntry* Raft::entry_at(Index i) const {
-    if (i == 0 || i > last_log_index()) return nullptr;
-    return &log_[i];
+    if (i <= snapshot_index() || i > last_log_index()) return nullptr;
+    return &at(i);
 }
 
 std::optional<Term> Raft::term_at(Index i) const {
-    if (i > last_log_index()) return std::nullopt;
-    return log_[i].term;   // Phase 8 (compaction) changes this, and only this, lookup
+    // The sentinel log_[0] stands for the snapshot's last entry: its term is known, the
+    // entries before it are not.
+    if (i < snapshot_index() || i > last_log_index()) return std::nullopt;
+    return at(i).term;
 }
+
+const LogEntry& Raft::at(Index i) const { return log_[static_cast<std::size_t>(i - snapshot_index())]; }
 
 // §5.4.1: the candidate's log must be at least as up to date as ours, comparing the last
 // entry's term first and then the index.

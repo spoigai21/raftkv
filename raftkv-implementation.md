@@ -820,6 +820,40 @@ Without compaction the log grows forever and restarts slow down.
 **Done when:** after 100k operations the on-disk log is bounded, and a fresh node catches up
 by snapshot in under a second.
 
+*As built* (`src/raft/raft.cpp`, `src/store/file_storage.cpp`, `src/kv/state_machine.cpp`):
+
+- **Indexing:** every log index goes through `Raft::at()`, the one place that turns an
+  index into a position. That change came first, alone, and left both golden hashes
+  byte-identical.
+- **When to snapshot:** after applying, once `snapshot_every` entries have built up. It is
+  off by default (tests that need it turn it on); `raftkvd --snapshot-every N` defaults
+  to 1000.
+- **Hooks:** Raft gets the state machine through `SnapshotHooks{take, restore}`. The KV
+  snapshot is protobuf, in key order (equal states encode to equal bytes), and **includes
+  the dedup table**.
+- **InstallSnapshot** follows Figure 13: keep the log after the snapshot if its last entry
+  matches, otherwise discard it all. A stale snapshot changes nothing. `AppendEntries`
+  skips entries a follower's snapshot already covers.
+- **On disk:** `snapshot` is replaced atomically, like `hard_state`. Then the log is
+  rewritten without the covered entries, also atomically. Recovery accepts a new snapshot
+  next to an old log (a crash between the two steps) and refuses a damaged snapshot.
+- **Done-gate:**
+  - 100,000 operations on real files with a snapshot every 200 entries: the log never
+    exceeded 204 entries or 11 KB on disk;
+  - a node that was down from the start caught up by snapshot in 36 ms median, 57 ms max
+    (10 seeds).
+- **Correctness:** 100 seeds of chaos with a snapshot every 25 entries go through
+  Porcupine, all linearizable. The Phase 5 failover test also runs with a snapshot every 2
+  entries, and the real-process smoke test now snapshots every 20.
+- **Planted bugs, all caught:** dedup table left out; snapshot labelled one entry early;
+  follower keeps a conflicting log; `AppendEntries` re-appends compacted entries; recovery
+  keeps covered entries. The mislabelled snapshot was at first caught by nothing. In the
+  KV store, the extra re-apply it causes is absorbed by duplicate detection. A test with a
+  counting state machine now checks the label directly.
+- **Limit:** a snapshot travels in one message, so the state machine must fit in a 16 MiB
+  frame. A lagging follower is re-sent the snapshot with every heartbeat until it acks.
+  Chunked transfer is the fix if state grows.
+
 ---
 
 ## Phase 9 — Measure it

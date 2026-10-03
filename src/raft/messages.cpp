@@ -13,6 +13,8 @@ constexpr std::string_view kRequestVote = "RequestVote";
 constexpr std::string_view kRequestVoteReply = "RequestVoteReply";
 constexpr std::string_view kAppendEntries = "AppendEntries";
 constexpr std::string_view kAppendEntriesReply = "AppendEntriesReply";
+constexpr std::string_view kInstallSnapshot = "InstallSnapshot";
+constexpr std::string_view kInstallSnapshotReply = "InstallSnapshotReply";
 
 std::string serialize(const google::protobuf::MessageLite& pb) {
     std::string out;
@@ -60,6 +62,21 @@ struct Encoder {
         pb.set_conflict_index(r.conflict_index);
         pb.set_conflict_term(r.conflict_term);
         return {.from = 0, .to = to, .method = std::string(kAppendEntriesReply), .payload = serialize(pb)};
+    }
+    Message operator()(const InstallSnapshot& r) const {
+        pb::InstallSnapshot pb;
+        pb.set_term(r.term);
+        pb.set_leader_id(r.leader_id);
+        pb.set_last_included_index(r.snapshot.last_included_index);
+        pb.set_last_included_term(r.snapshot.last_included_term);
+        pb.set_data(r.snapshot.data);
+        return {.from = 0, .to = to, .method = std::string(kInstallSnapshot), .payload = serialize(pb)};
+    }
+    Message operator()(const InstallSnapshotReply& r) const {
+        pb::InstallSnapshotReply pb;
+        pb.set_term(r.term);
+        pb.set_match_index(r.match_index);
+        return {.from = 0, .to = to, .method = std::string(kInstallSnapshotReply), .payload = serialize(pb)};
     }
 };
 
@@ -110,6 +127,19 @@ tl::expected<Rpc, std::string> parse(const Message& m) {
                                       .conflict_term = pb.conflict_term()};
         });
     }
+    if (m.method == kInstallSnapshot) {
+        return decode_pb<pb::InstallSnapshot>(m).map([](const pb::InstallSnapshot& pb) -> Rpc {
+            return InstallSnapshot{.term = pb.term(), .leader_id = pb.leader_id(),
+                                   .snapshot = {.last_included_index = pb.last_included_index(),
+                                                .last_included_term = pb.last_included_term(),
+                                                .data = pb.data()}};
+        });
+    }
+    if (m.method == kInstallSnapshotReply) {
+        return decode_pb<pb::InstallSnapshotReply>(m).map([](const pb::InstallSnapshotReply& pb) -> Rpc {
+            return InstallSnapshotReply{.term = pb.term(), .match_index = pb.match_index()};
+        });
+    }
     return tl::unexpected(std::format("unknown method '{}'", m.method));
 }
 
@@ -125,6 +155,13 @@ struct Describer {
     std::string operator()(const AppendEntries& r) const {
         return std::format("AppendEntries term={} prev={}/{} n={} commit={}", r.term,
                            r.prev_log_index, r.prev_log_term, r.entries.size(), r.leader_commit);
+    }
+    std::string operator()(const InstallSnapshot& r) const {
+        return std::format("InstallSnapshot term={} last={}/{} bytes={}", r.term, r.snapshot.last_included_index,
+                           r.snapshot.last_included_term, r.snapshot.data.size());
+    }
+    std::string operator()(const InstallSnapshotReply& r) const {
+        return std::format("InstallSnapshotReply term={} match={}", r.term, r.match_index);
     }
     std::string operator()(const AppendEntriesReply& r) const {
         return r.success ? std::format("AppendEntriesReply term={} ok match={}", r.term, r.match_index)

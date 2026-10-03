@@ -44,11 +44,23 @@ struct LogEntry {
     friend bool operator==(const LogEntry&, const LogEntry&) = default;
 };
 
+// The state machine as of `last_included_index`, standing in for log entries 1..that index
+// (implementation guide Phase 8). `data` is opaque to Raft: the state machine makes it.
+struct Snapshot {
+    Index last_included_index = 0;
+    Term last_included_term = 0;
+    std::string data;
+
+    friend bool operator==(const Snapshot&, const Snapshot&) = default;
+};
+
 // Everything a node persists: what a restarted node reads back from Storage.
 struct PersistentState {
     Term current_term = 0;
     std::optional<NodeId> voted_for;
-    std::vector<LogEntry> log;   // entries 1..N in order; no sentinel
+    std::optional<Snapshot> snapshot;
+    // Entries after the snapshot (or from 1, without one), in order; no sentinel.
+    std::vector<LogEntry> log;
 
     friend bool operator==(const PersistentState&, const PersistentState&) = default;
 };

@@ -25,6 +25,10 @@ public:
     // Makes every earlier append/truncate durable.
     virtual void sync() = 0;
 
+    // Replaces any earlier snapshot, durably, and drops every log entry it covers (index <=
+    // last_included_index). Entries after it are kept. Durable when it returns.
+    virtual void save_snapshot(const Snapshot& snapshot) = 0;
+
     // The state as this process currently sees it, synced or not. A node calls this once
     // on startup, when only durable state is left.
     virtual PersistentState load() const = 0;

@@ -46,7 +46,19 @@ struct AppendEntriesReply {
     Term conflict_term = 0;
 };
 
-using Rpc = std::variant<RequestVote, RequestVoteReply, AppendEntries, AppendEntriesReply>;
+struct InstallSnapshot {
+    Term term = 0;
+    NodeId leader_id = 0;
+    Snapshot snapshot;
+};
+
+struct InstallSnapshotReply {
+    Term term = 0;
+    Index match_index = 0;
+};
+
+using Rpc = std::variant<RequestVote, RequestVoteReply, AppendEntries, AppendEntriesReply, InstallSnapshot,
+                         InstallSnapshotReply>;
 
 // Wraps an RPC in a Message addressed to `to`. The sender is filled in by the Env.
 Message encode(NodeId to, const Rpc& rpc);

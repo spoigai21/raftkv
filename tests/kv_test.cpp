@@ -68,9 +68,9 @@ TEST(Kv, ClientFindsTheLeaderFromAnyServer) {
 // killed in the instant between commit and apply, so no reply is ever sent. The client times
 // out and retries the same (client_id, seq) on the new leader, where the entry is already
 // committed. Without duplicate detection the retry would append a second time.
-TEST(Kv, AppendSurvivesLeaderFailoverWithoutDuplication) {
+void append_survives_failover(raft::Index snapshot_every) {
     for (std::uint64_t seed : seeds(20)) {
-        RaftCluster c(seed, 3, ClusterOptions{.kv = true, .clients = 1});
+        RaftCluster c(seed, 3, ClusterOptions{.kv = true, .clients = 1, .snapshot_every = snapshot_every});
         c.sim().start();
         ASSERT_TRUE(c.wait_for_leader(2s));
         std::string want;
@@ -113,6 +113,13 @@ TEST(Kv, AppendSurvivesLeaderFailoverWithoutDuplication) {
         EXPECT_SAFE(c);
     }
 }
+
+TEST(Kv, AppendSurvivesLeaderFailoverWithoutDuplication) { append_survives_failover(0); }
+
+// Phase 8: the same, with a snapshot every 2 entries, so the retry almost always reaches a
+// node whose dedup table came out of a snapshot. Leaving the table out of snapshots fails
+// here.
+TEST(Kv, AppendSurvivesLeaderFailoverWithSnapshots) { append_survives_failover(2); }
 
 // A leader that is deposed while a request is pending answers NotLeader at once, instead of
 // leaving the client to time out.

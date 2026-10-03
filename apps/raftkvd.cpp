@@ -1,6 +1,9 @@
 // raftkvd: one raftkv server process.
 //
-//   raftkvd --id 1 --cluster cluster.json --data-dir data/1
+//   raftkvd --id 1 --cluster cluster.json --data-dir data/1 [--snapshot-every N]
+//
+// --snapshot-every N (default 1000) compacts the log after every N applied entries; 0 keeps
+// the whole log forever.
 //
 // Runs kv::Server (Raft + the key-value state machine) on FileStorage, talking to its peers
 // over TCP. Logs to stderr. Exits non-zero if its data directory is damaged (it will not
@@ -23,7 +26,7 @@
 namespace {
 
 int usage() {
-    std::fprintf(stderr, "usage: raftkvd --id N --cluster FILE --data-dir DIR\n");
+    std::fprintf(stderr, "usage: raftkvd --id N --cluster FILE --data-dir DIR [--snapshot-every N]\n");
     return 2;
 }
 
@@ -32,6 +35,7 @@ int usage() {
 int main(int argc, char** argv) {
     using namespace raftkv;
     std::uint32_t id = 0;
+    std::uint64_t snapshot_every = 1000;
     std::string cluster_file, data_dir;
     for (int i = 1; i + 1 < argc; i += 2) {
         const std::string_view flag = argv[i];
@@ -42,6 +46,8 @@ int main(int argc, char** argv) {
             cluster_file = value;
         } else if (flag == "--data-dir") {
             data_dir = value;
+        } else if (flag == "--snapshot-every") {
+            if (std::from_chars(value, value + std::strlen(value), snapshot_every).ec != std::errc{}) return usage();
         } else {
             return usage();
         }
@@ -65,6 +71,7 @@ int main(int argc, char** argv) {
     }
 
     raft::RaftConfig config{.id = id, .peers = {}};
+    config.snapshot_every = snapshot_every;
     for (const auto& [peer, endpoint] : *cluster) {
         if (peer != id) config.peers.push_back(peer);
     }

@@ -28,6 +28,13 @@ raft::PersistentState SimStorage::load() const {
     return view;
 }
 
+void SimStorage::save_snapshot(const raft::Snapshot& snapshot) {
+    // Durable at once, like the hard state. Unsynced appends stay pending; whatever part of
+    // them the snapshot covers is skipped when they are applied.
+    synced_.snapshot = snapshot;
+    std::erase_if(synced_.log, [&](const raft::LogEntry& e) { return e.index <= snapshot.last_included_index; });
+}
+
 std::size_t SimStorage::crash(CrashMode mode, Rng& rng) {
     std::size_t keep = 0;
     if (mode == CrashMode::KeepRandomPrefix) keep = rng.between(0, pending_.size());
@@ -39,7 +46,10 @@ std::size_t SimStorage::crash(CrashMode mode, Rng& rng) {
 
 void SimStorage::apply(raft::PersistentState& s, const Op& op) {
     if (const auto* a = std::get_if<Append>(&op)) {
-        s.log.insert(s.log.end(), a->entries.begin(), a->entries.end());
+        const raft::Index covered = s.snapshot ? s.snapshot->last_included_index : 0;
+        for (const raft::LogEntry& e : a->entries) {
+            if (e.index > covered) s.log.push_back(e);
+        }
     } else {
         const raft::Index from = std::get<Truncate>(op).from;
         std::erase_if(s.log, [from](const raft::LogEntry& e) { return e.index >= from; });

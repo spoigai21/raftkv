@@ -47,7 +47,9 @@ fail() {
 trap cleanup EXIT
 
 start() {  # start node $1
-    "$RAFTKVD" --id "$1" --cluster "$CLUSTER" --data-dir "$WORK/data$1" >>"$WORK/node$1.log" 2>&1 &
+    # Snapshots every 20 entries, so restarts below recover from snapshots and a lagging node
+    # can be sent one (Phase 8).
+    "$RAFTKVD" --id "$1" --cluster "$CLUSTER" --data-dir "$WORK/data$1" --snapshot-every 20 >>"$WORK/node$1.log" 2>&1 &
     PID[$1]=$!
 }
 kill9() {  # kill -9 node $1
@@ -128,7 +130,7 @@ printf "\\x$NEW" | dd of="$LOG" bs=1 seek="$AT" conv=notrunc 2>/dev/null
 AFTER=$(od -An -tx1 -j "$AT" -N1 "$LOG" | tr -d ' ')
 # Make sure the corruption really happened, so a pass means "refused", not "nothing to refuse".
 [[ $AFTER == "$NEW" ]] || fail "could not corrupt byte $AT of a $SIZE-byte log (was $BEFORE, now $AFTER)"
-"$RAFTKVD" --id 3 --cluster "$CLUSTER" --data-dir "$WORK/data3" >>"$WORK/node3.log" 2>&1 &
+"$RAFTKVD" --id 3 --cluster "$CLUSTER" --data-dir "$WORK/data3" --snapshot-every 20 >>"$WORK/node3.log" 2>&1 &
 P3=$!
 if ! wait_exit $P3 10; then kill -9 $P3; fail "node 3 is running on a corrupt log (log size $SIZE)"; fi
 [[ $RC -eq 1 ]] || fail "node 3 started on a corrupt log (exit $RC)"

@@ -33,6 +33,21 @@ message AppendEntries {
   uint64 leader_commit = 6;
 }
 
+// Sent instead of AppendEntries to a follower whose next entry the leader has compacted away
+// (implementation guide Phase 8, Figure 13 of the paper). The snapshot travels in one message.
+message InstallSnapshot {
+  uint64 term = 1;
+  uint32 leader_id = 2;
+  uint64 last_included_index = 3;
+  uint64 last_included_term = 4;
+  bytes data = 5;
+}
+
+message InstallSnapshotReply {
+  uint64 term = 1;
+  uint64 match_index = 2;   // the follower's log now matches the leader's up to here
+}
+
 message AppendEntriesReply {
   uint64 term = 1;
   bool success = 2;

@@ -19,6 +19,9 @@ struct RaftConfig {
     Duration election_timeout_max{300'000};
     Duration heartbeat_interval{50'000};
     std::size_t max_entries_per_append = 64;
+    // Take a snapshot once this many applied entries have built up since the last one
+    // (implementation guide Phase 8). 0: never, and the log grows without bound.
+    Index snapshot_every = 0;
 };
 
 enum class Role { Follower, Candidate, Leader };
@@ -26,6 +29,14 @@ enum class Role { Follower, Candidate, Leader };
 // Receives committed entries, in log order, each exactly once per boot. Entries with an empty
 // command are the no-ops a new leader appends; a state machine ignores them.
 using ApplyFn = std::function<void(const LogEntry&)>;
+
+// How Raft gets at the state machine for snapshots. `take` serializes it as of the last
+// applied entry; `restore` replaces it with a snapshot's contents (on boot, and when the
+// leader sends one). Without them, Raft never snapshots.
+struct SnapshotHooks {
+    std::function<std::string()> take;
+    std::function<void(const std::string&)> restore;
+};
 
 struct ProposeResult {
     bool accepted = false;
@@ -39,7 +50,7 @@ struct ProposeResult {
 // and the outside world is reached only through Env.
 class Raft final : public Node {
 public:
-    Raft(RaftConfig config, Env& env, ApplyFn apply = {});
+    Raft(RaftConfig config, Env& env, ApplyFn apply = {}, SnapshotHooks snapshots = {});
 
     void on_start() override;
     void on_message(const Message& m) override;
@@ -59,8 +70,11 @@ public:
 
     Index last_log_index() const { return log_.back().index; }
     Term last_log_term() const { return log_.back().term; }
-    // nullptr if this node does not hold entry `i` (index 0 is the sentinel).
+    // nullptr if this node does not hold entry `i`: past its end, or compacted into the
+    // snapshot (index 0, before any snapshot, is the sentinel).
     const LogEntry* entry_at(Index i) const;
+    // Entries up to and including this index live only in the snapshot (0: no snapshot).
+    Index snapshot_index() const { return log_.front().index; }
 
 private:
     enum : TimerTag { kElectionTimer = 1, kHeartbeatTimer = 2, kApplyTimer = 3 };
@@ -69,6 +83,8 @@ private:
     void handle(NodeId from, const RequestVoteReply& r);
     void handle(NodeId from, const AppendEntries& r);
     void handle(NodeId from, const AppendEntriesReply& r);
+    void handle(NodeId from, const InstallSnapshot& r);
+    void handle(NodeId from, const InstallSnapshotReply& r);
 
     void start_election();
     void become_leader();
@@ -82,6 +98,9 @@ private:
     void advance_commit_index();
     void set_commit_index(Index index);
     void apply_committed();
+    void maybe_take_snapshot();
+    // Replaces log entries up to s.last_included_index with the snapshot, in memory.
+    void compact_to(const Snapshot& s);
 
     // Appends to the in-memory log and to storage, and syncs before returning.
     void append_durably(std::vector<LogEntry> entries);
@@ -94,16 +113,23 @@ private:
 
     std::size_t majority() const { return (config_.peers.size() + 1) / 2 + 1; }
     std::optional<Term> term_at(Index i) const;
+    // Entry `i`, which must be in the log or be the sentinel. The one place that turns a log
+    // index into a position in log_ (implementation guide §3.3).
+    const LogEntry& at(Index i) const;
     bool candidate_log_is_up_to_date(Index last_index, Term last_term) const;
 
     RaftConfig config_;
     Env& env_;
     ApplyFn apply_;
+    SnapshotHooks snapshots_;
 
     // Persistent state (Figure 2): saved through Storage before any reply that depends on it.
     Term current_term_ = 0;
     std::optional<NodeId> voted_for_;
-    std::vector<LogEntry> log_;   // log_[0] is the term-0 sentinel (implementation guide §3.3)
+    // log_[0] is a sentinel: index 0, term 0 before any snapshot, and the snapshot's last
+    // included entry after one (implementation guide §3.3).
+    std::vector<LogEntry> log_;
+    std::optional<Snapshot> snapshot_;   // the latest snapshot, kept to send to followers
 
     // Volatile state.
     Role role_ = Role::Follower;

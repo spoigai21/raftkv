@@ -5,6 +5,8 @@
 #include <optional>
 #include <string>
 
+#include <tl/expected.hpp>
+
 #include "kv/messages.hpp"
 
 namespace raftkv::kv {
@@ -24,6 +26,16 @@ public:
     Result apply(const Command& c);
 
     std::optional<std::string> get(const std::string& key) const;
+
+    // For Raft snapshots: the whole state, dedup table included (implementation guide
+    // Phase 8), and back. Equal states encode to equal bytes.
+    std::string serialize() const;
+    static tl::expected<StateMachine, std::string> deserialize(const std::string& bytes);
+
+    // Same data and same dedup table (the duplicates counter is a statistic, not state).
+    friend bool operator==(const StateMachine& a, const StateMachine& b) {
+        return a.data_ == b.data_ && a.sessions_ == b.sessions_;
+    }
     std::size_t size() const { return data_.size(); }
     std::uint64_t duplicates_suppressed() const { return duplicates_; }
 
@@ -31,6 +43,7 @@ private:
     struct Session {
         std::uint64_t last_seq = 0;
         Result last_result;
+        friend bool operator==(const Session&, const Session&) = default;
     };
 
     std::map<std::string, std::string> data_;

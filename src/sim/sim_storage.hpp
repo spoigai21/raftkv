@@ -22,6 +22,7 @@ public:
     void append(std::span<const raft::LogEntry> entries) override;
     void truncate_suffix(raft::Index from) override;
     void sync() override;
+    void save_snapshot(const raft::Snapshot& snapshot) override;
     raft::PersistentState load() const override;
 
     // Simulator-only. Returns how many unsynced operations were lost.

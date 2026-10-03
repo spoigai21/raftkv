@@ -7,7 +7,19 @@ namespace raftkv::kv {
 Server::Server(raft::RaftConfig config, raft::Env& env, raft::ApplyFn observer)
     : env_(env),
       observer_(std::move(observer)),
-      raft_(std::move(config), env, [this](const raft::LogEntry& e) { on_apply(e); }) {}
+      raft_(std::move(config), env, [this](const raft::LogEntry& e) { on_apply(e); },
+            raft::SnapshotHooks{
+                .take = [this] { return state_.serialize(); },
+                .restore =
+                    [this](const std::string& data) {
+                        auto restored = StateMachine::deserialize(data);
+                        // Raft verified the snapshot's checksum on disk and it came from a
+                        // leader; failing to parse it means a bug, and serving on would be wrong.
+                        if (!restored) throw std::runtime_error("cannot restore KV snapshot: " + restored.error());
+                        state_ = std::move(*restored);
+                        pending_.clear();   // a restore replaces history; nothing pending can match it
+                    },
+            }) {}
 
 void Server::on_start() { raft_.on_start(); }
 

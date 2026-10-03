@@ -1,5 +1,7 @@
 #include "kv/state_machine.hpp"
 
+#include "kv/kv.pb.h"
+
 namespace raftkv::kv {
 
 Result StateMachine::apply(const Command& c) {
@@ -27,6 +29,35 @@ Result StateMachine::apply(const Command& c) {
     s.last_seq = c.seq;
     s.last_result = r;
     return r;
+}
+
+std::string StateMachine::serialize() const {
+    pb::KvSnapshot pb;
+    for (const auto& [key, value] : data_) {
+        auto* p = pb.add_data();
+        p->set_key(key);
+        p->set_value(value);
+    }
+    for (const auto& [client, s] : sessions_) {
+        auto* p = pb.add_sessions();
+        p->set_client_id(client);
+        p->set_last_seq(s.last_seq);
+        p->set_last_value(s.last_result.value);
+        p->set_last_found(s.last_result.found);
+    }
+    return pb.SerializeAsString();
+}
+
+tl::expected<StateMachine, std::string> StateMachine::deserialize(const std::string& bytes) {
+    pb::KvSnapshot pb;
+    if (!pb.ParseFromString(bytes)) return tl::unexpected(std::string("malformed KV snapshot"));
+    StateMachine sm;
+    for (const auto& p : pb.data()) sm.data_[p.key()] = p.value();
+    for (const auto& p : pb.sessions()) {
+        sm.sessions_[p.client_id()] = {.last_seq = p.last_seq(),
+                                       .last_result = {.value = p.last_value(), .found = p.last_found()}};
+    }
+    return sm;
 }
 
 std::optional<std::string> StateMachine::get(const std::string& key) const {
