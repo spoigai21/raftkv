@@ -1,27 +1,74 @@
 # raftkv
 
-A replicated key–value store in C++20, built on the Raft consensus algorithm.
-It runs as 3 or 5 processes on one machine, talking over real sockets, and keeps working when a minority of them crash.
-It is a learning project: one Raft group, no transactions or indexes, and it isn't built to be fast.
+A replicated key–value store in C++20, built on the Raft consensus algorithm, written from
+the paper. It runs as 3 or 5 processes on one machine over real TCP, survives the loss of a
+minority of them without losing an acknowledged write, and **proves it**: a deterministic
+simulator, a fault matrix, and a linearizability checker run over every history.
+It is a learning project with stated limits: one Raft group, one machine, no transactions,
+and durable writes are bound by fsync (about 250 writes/s per node on a laptop).
 
-> **Status:** Phase 9 — a working replicated KV store with snapshots, a passing fault matrix, 540 fault-injected histories checked linearizable by Porcupine, and measured results (below). The write-up and demo (Phase 10) remain.
+> **Status:** built, tested and measured; only recording the narrated demo video remains.
+> 132 tests run on every push: 129 unit and simulation tests, the real-process smoke test,
+> the Porcupine check and the demo. They run under ASan/UBSan, TSan and Release, with gcc-13
+> and clang-17.
 
-## What it will do
+## What it does
 
-- **Replicate:** every node applies the same writes in the same order.
-- **Survive failures:** if the leader dies, the others elect a new one, and no acknowledged write is lost.
-- **Fail safely:** a node cut off from the majority refuses writes instead of returning wrong answers.
-- **Recover from crashes:** state is saved to disk with checksums, so a node can be killed with `kill -9` and restart cleanly.
-- **Serve a simple KV API:** `Get`, `Put` and `Append`, with duplicate detection so a retried request is applied only once.
-- **Compact its log:** snapshots keep the on-disk log bounded. Over 100,000 operations it never held more than about 200 entries (11 KB), and a node that was down from the start catches up from a snapshot in under 60 ms.
+- **Replicates:** every node applies the same writes in the same order (leader election,
+  log replication and the §5.4.2 commit rule, from Figure 2 of the paper).
+- **Survives failures:** `kill -9` the leader and writes resume in about half a second
+  (495 ms median, measured), with nothing acknowledged lost.
+- **Fails safely:** a node cut off from the majority commits nothing. With no majority
+  anywhere, the cluster stops answering rather than answer wrongly.
+- **Recovers from crashes:** a checksummed, fsynced log and an atomically replaced hard
+  state and snapshot. A torn write is cut off; any other damage makes the node refuse to start.
+- **Serves a KV API:** `Get`, `Put`, `Append`. Reads go through the log, and duplicate
+  detection applies a retried request once, across failovers and snapshots.
+- **Compacts its log:** over 100,000 operations the log never held more than 204 entries
+  (11 KB), and a node that was down from the start catches up from a snapshot in under 60 ms.
 
-## How it will be tested
+## Architecture
 
-- **Deterministic simulator:** the whole cluster runs in one process on a virtual clock with a seeded network, so any failure replays exactly from `--seed N`.
-- **Fault matrix:** crashes, partitions, message drops, delays and corrupted logs are all injected by automated tests.
-- **Linearizability checking:** recorded operation histories are checked with [Porcupine](https://github.com/anishathalye/porcupine), through a small Go tool in `tools/lincheck` (a dev dependency only). See [`docs/lincheck/`](docs/lincheck/) for what a failure looks like.
-- **Memory and thread safety:** CI runs ASan, UBSan and TSan, and the log decoder is fuzzed with libFuzzer.
-- **Benchmarks:** throughput, latency and failover time, written to `docs/results.csv`.
+```mermaid
+flowchart LR
+    client["raftkvctl / raftkvload<br/>kv::Client"] -- "KvRequest / KvReply" --> server
+    subgraph server["raftkvd (one per node)"]
+        direction TB
+        kvserver["kv::Server<br/>state machine + dedup table"] --> raft["raft::Raft<br/>single-threaded, event-driven"]
+        raft --> env["Env: time, timers, send, storage, randomness"]
+    end
+    env -- "real process" --> asio["AsioEnv<br/>TCP frames, steady_timer"]
+    env -- "real process" --> file["FileStorage<br/>log, hard_state, snapshot"]
+    env -. "in tests" .-> sim["Sim<br/>virtual clock, seeded network,<br/>crashes, partitions, pauses"]
+    env -. "in tests" .-> simstore["SimStorage<br/>loses unsynced writes on crash"]
+```
+
+The Raft core never blocks, never takes a lock and never asks the OS for anything. It is
+driven one event at a time, and everything nondeterministic comes through one `Env`
+interface. Tests give it the simulator, so a whole cluster runs in one process on a virtual
+clock and any failure replays from `RAFTKV_SEED=N`. `raftkvd` gives it Asio and real files.
+The same `Raft` and `kv::Server` code runs in both.
+
+## How it is tested
+
+- **Deterministic simulator:** seeded network, crashes, partitions, pauses and message
+  loss. Raft's safety properties are checked after **every** simulated event: one leader per
+  term, Leader Completeness, committed entries never change, and State Machine Safety. A
+  golden test checks that a seed replays byte-identically on macOS and Linux.
+- **Fault matrix:** every row below is an automated test.
+- **Linearizability:** client histories are checked with
+  [Porcupine](https://github.com/anishathalye/porcupine) (via `tools/lincheck`, a small Go
+  dev tool): 540 simulator histories (about 297k operations) and a real-process history
+  that spans a `kill -9` of the leader. All linearizable. Planted bugs (stale local reads,
+  no dedup, replying before commit, dedup missing from snapshots) are all caught; see
+  [`docs/lincheck/`](docs/lincheck/).
+- **Real processes:** `tests/cluster/smoke.sh` and `tools/demo.sh --check` run `raftkvd`
+  for real and `kill -9` it. CI repeats the smoke test 10× per job.
+- **Memory and thread safety:** ASan/UBSan and TSan in CI, with a hardened standard
+  library. The on-disk log decoder is fuzzed with libFuzzer (over a million inputs a
+  minute, and CI fuzzes every push).
+- **Mutation checks:** each phase planted the bugs its tests exist for and confirmed they
+  fail. Where one went undetected, a test was added.
 
 ## Fault matrix
 
@@ -96,9 +143,50 @@ One log append plus sync takes 4,056 µs with fsync and 6.5 µs without, which i
 **What the numbers say.** Every write is bound by fsync. One append plus `F_FULLFSYNC` takes 4.06 ms, a ceiling of about 247 syncs per second, and a single node reaches 250 ops/s: the leader syncs once per proposal, with no group commit across concurrent requests. Without fsync the same cluster does 119,900 ops/s. That is why extra followers cost so little (followers sync in parallel with each other), why sanitizer builds are barely slower, and why batching matters more than predicted: with one entry per RPC, followers sync once per entry too. Leader recovery is set by the client's 500 ms request timeout, not by the election (150–300 ms): the request in flight to the dead leader has to time out first. Group commit and a shorter, adaptive client timeout are the two obvious next steps.
 <!-- results:end -->
 
-## Stack
+## What went wrong
 
-C++20 · CMake + Ninja · vcpkg · standalone Asio · Protocol Buffers · GoogleTest · Google Benchmark · GitHub Actions
+Everything here was found by the tests above, and each is written up.
+
+- **A server could crash when a peer died mid-write**
+  ([postmortem 002](docs/postmortems/002-pop-from-emptied-write-queue.md)). It only shows up
+  with real sockets, which the simulator never uses. The repeated real-process test caught
+  it (5 of 20 Release runs crashed). A hardened standard library now traps it at the exact line.
+- **The invariant checker was stricter than the paper**
+  ([postmortem 001](docs/postmortems/001-leader-completeness-check-too-strict.md)). A node
+  paused mid-election legitimately led an old term. The fix was to state Leader
+  Completeness exactly as Figure 3 does.
+- **The first on-disk record format** (`[len][crc][payload]`) could not tell a damaged
+  length from a torn write, so recovery could silently drop synced records. Caught in design
+  review, before any data was written; records now carry a header checksum.
+- **Two of three benchmark predictions were wrong**, recorded before measuring (see
+  Results): five nodes cost 7.3% rather than 25%, and batching gave 3.4× rather than 2×.
+  Both come from not yet appreciating how completely fsync dominates.
+- **Three fault-matrix rows did not meet the plan's expectation**, and the table reports
+  them as measured rather than with the thresholds adjusted until they passed.
+- **Test bugs:** a deadline-less test that could hang, a smoke test that "corrupted" an empty
+  file, and guessed thresholds that the data contradicted. Each was found and fixed, with
+  the reason in the commit history.
+- **The checker has not found a real bug** that the other tests missed. That was prediction 5;
+  so far it is wrong. It has caught every planted one.
+
+## Limits and next steps
+
+- **fsync-bound writes:** each request pays its own 4 ms `F_FULLFSYNC`. **Group commit**
+  (one sync for many requests) is the biggest available win: without fsync the same
+  cluster does about 120,000 ops/s.
+- **Failover is set by the client:** a 500 ms request timeout dominates the ~500 ms pause,
+  and the client then retries a different server. A shorter, adaptive timeout and retrying
+  the same server once would cut it. The same design costs 95% of throughput at 20% loss.
+- **No PreVote or CheckQuorum:** a node that comes back from a partition forces an
+  election, and a slow follower keeps doing so (measured: up to 22% throughput).
+- **Snapshots travel in one message**, so the state must fit a 16 MiB frame.
+- **Not tested: power loss.** `kill -9` cannot show that fsync is durable. `SimStorage`
+  models lost unsynced writes; the disk itself would need LazyFS or `dm-log-writes`.
+- **Out of scope for v1:** membership changes, `ReadIndex`/lease reads, a gRPC front end,
+  multi-Raft sharding, client-session eviction.
+- **Open question:** once, before snapshots existed, the smoke test's corruption step found
+  its byte missing from the file afterwards. It has not recurred in the 300-odd runs since; the
+  test now verifies the corruption and fails fast with logs if it happens again.
 
 ## Building
 
@@ -128,12 +216,25 @@ for i in 1 2 3; do ./build/rel/raftkvd --id $i --cluster cluster.json --data-dir
 Kill any one server with `kill -9` and the other two keep serving; restart it and it
 catches up from its data directory.
 
-## Out of scope for v1
+## Demo
 
-Membership changes, `ReadIndex`/lease reads, a gRPC front end, and sharding across multiple Raft groups.
+```sh
+tools/demo.sh
+```
+
+Starts a 3-node cluster, runs four clients, `kill -9`s the leader mid-stream, shows writes
+pause and resume, and checks every operation the clients saw with Porcupine. A narrated
+script for recording it is in [`docs/demo.md`](docs/demo.md). `tools/demo.sh --check` runs
+the same thing non-interactively, and CI runs it on every push.
+
+## Stack
+
+C++20 · CMake + Ninja · vcpkg · standalone Asio · Protocol Buffers · GoogleTest · Google Benchmark · libFuzzer · Porcupine (Go) · GitHub Actions
 
 ## More detail
 
-- [`raftkv.md`](raftkv.md): goals, scope and what counts as done
-- [`raftkv-implementation.md`](raftkv-implementation.md): the phase-by-phase build plan
-- [`docs/postmortems/`](docs/postmortems/): every real bug found so far, what caused it and how it was caught
+- [`raftkv.md`](raftkv.md): goals, scope, and the predictions with their outcomes
+- [`raftkv-implementation.md`](raftkv-implementation.md): the phase-by-phase plan, with what was actually built
+- [`docs/postmortems/`](docs/postmortems/): the real bugs found
+- [`docs/lincheck/`](docs/lincheck/): what a linearizability failure looks like
+- [`docs/results.csv`](docs/results.csv): the raw measurements

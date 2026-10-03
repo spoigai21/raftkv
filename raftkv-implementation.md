@@ -913,6 +913,22 @@ reports the history linearizable · one limitation stated out loud.
 **Stretch, in order of value:** membership changes (add/remove a node) → `ReadIndex` reads →
 a gRPC front end → multi-Raft sharding.
 
+*As built:*
+
+- **README** in the order above, in present tense, with a Mermaid architecture diagram. Its
+  "What went wrong" section links both postmortems, the wrong predictions, the fault-matrix
+  rows that did not meet expectations, and the test bugs. Its "Limits and next steps" names
+  group commit, client timeouts, PreVote/CheckQuorum, single-message snapshots, untested
+  power loss and one open question.
+- **`tools/demo.sh`** is the demo as one command. `raftkvload --history` records what real
+  clients saw, so the Porcupine check now covers a real-process run that spans a `kill -9`
+  of the leader, not only the simulator. A planted double-append bug makes it fail.
+  `tools/demo.sh --check` runs in ctest (`demo_check`) on every push.
+- **`docs/demo.md`** is the recording script: beats, timings, narration, and the limitation
+  said out loud. It also explains why throughput rises after the kill, which viewers will
+  notice: on one laptop all nodes share an SSD, so fewer nodes contend less for fsync.
+- **The video itself has to be recorded by the author.**
+
 ---
 
 ## Common Raft bugs — check these first

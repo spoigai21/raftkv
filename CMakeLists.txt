@@ -73,7 +73,7 @@ add_executable(raftkvctl apps/raftkvctl.cpp)
 target_link_libraries(raftkvctl PRIVATE raftkv raftkv_warnings)
 
 add_executable(raftkvload apps/raftkvload.cpp)
-target_link_libraries(raftkvload PRIVATE raftkv raftkv_warnings)
+target_link_libraries(raftkvload PRIVATE raftkv raftkv_warnings nlohmann_json::nlohmann_json)
 
 if(RAFTKV_BUILD_TESTS)
     enable_testing()
@@ -114,6 +114,13 @@ if(RAFTKV_BUILD_TESTS)
                      $<TARGET_FILE:raftkv_tests> ${CMAKE_CURRENT_SOURCE_DIR}
                      ${CMAKE_CURRENT_BINARY_DIR}/lincheck)
     set_tests_properties(lincheck PROPERTIES TIMEOUT 900 SKIP_RETURN_CODE 77)
+
+    # The Phase 10 demo, non-interactively: real processes, kill -9 of the leader mid-stream,
+    # and Porcupine on everything the clients saw (tools/demo.sh). Needs Go, like lincheck.
+    add_test(NAME demo_check
+             COMMAND ${CMAKE_COMMAND} -E env BUILD=$<TARGET_FILE_DIR:raftkvd>
+                     bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/demo.sh --check)
+    set_tests_properties(demo_check PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
 endif()
 
 if(RAFTKV_FUZZ)
