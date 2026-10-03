@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The raftkv demo (implementation guide Phase 10), as one command:
 #
-#   tools/demo.sh            # for the video: narrated pauses between steps
+#   tools/demo.sh            # interactive: paced, with a countdown before the kill
 #   tools/demo.sh --check    # the same run without pauses; fails unless it all holds (ctest)
 #
 # 1. Starts a 3-node cluster of real raftkvd processes.
@@ -16,7 +16,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 BUILD=${BUILD:-$ROOT/build/rel}
 CHECK=0
 [[ ${1:-} == --check ]] && CHECK=1
-SECONDS_OF_LOAD=20   # interactive: long enough to narrate the dip and the recovery
+SECONDS_OF_LOAD=20   # interactive: long enough to watch the dip and the recovery
 KILL_AFTER=8
 [[ $CHECK == 1 ]] && { SECONDS_OF_LOAD=12; KILL_AFTER=5; }
 

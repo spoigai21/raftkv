@@ -3,7 +3,7 @@
 What this project is, why it exists, and what counts as done.
 The step-by-step build is in `raftkv-implementation.md`.
 
-**Status:** complete, except recording the narrated demo video (script: `docs/demo.md`).
+**Status:** complete. The demo is a recorded run in the README, in place of a video.
 
 ---
 
@@ -109,7 +109,7 @@ Detail in `raftkv-implementation.md`; each phase has a done-when gate.
 | 7 | The fault matrix, as tests |
 | 8 | Snapshots and log compaction |
 | 9 | Benchmarks and the predictions, confirmed or refuted |
-| 10 | README, postmortems, narrated demo video |
+| 10 | README, postmortems, a recorded demo run |
 
 **Clean stopping point:** phases 0–7 plus the write-up already stand on their own. Snapshots
 and benchmarks make it stronger, not valid.

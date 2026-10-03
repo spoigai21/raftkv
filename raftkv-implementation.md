@@ -924,10 +924,9 @@ a gRPC front end → multi-Raft sharding.
   clients saw, so the Porcupine check now covers a real-process run that spans a `kill -9`
   of the leader, not only the simulator. A planted double-append bug makes it fail.
   `tools/demo.sh --check` runs in ctest (`demo_check`) on every push.
-- **`docs/demo.md`** is the recording script: beats, timings, narration, and the limitation
-  said out loud. It also explains why throughput rises after the kill, which viewers will
-  notice: on one laptop all nodes share an SSD, so fewer nodes contend less for fsync.
-- **The video itself has to be recorded by the author.**
+- **No video.** Instead of a narrated recording, the README shows one real run: a results
+  table and the full output. That output includes the dip and recovery around the
+  `kill -9`, the Porcupine verdict, and the limitation stated in plain words.
 
 ---
 
