@@ -3,7 +3,7 @@
 What this project is, why it exists, and what counts as done.
 The step-by-step build is in `raftkv-implementation.md`.
 
-**Status:** Phase 8 (snapshots and log compaction). Benchmarks are next.
+**Status:** Phase 9 (measured; predictions scored below). The write-up and demo remain.
 
 ---
 
@@ -136,6 +136,15 @@ Setup: 3 or 5 `raftkvd` processes on this laptop, 32 closed-loop clients, durabl
    planted bug.
 
 Prediction 5 is the interesting one: if it is wrong, that is a result worth reporting too.
+
+**Measured** (Phase 9, `docs/results.csv`; the full table is in the README):
+
+1. ✗ 3 → 5 nodes cost **7.3%**, not 25%. Each node is bound by its own fsync, and followers
+   sync in parallel with each other, so extra followers cost little.
+2. ✓ Writes resumed **495 ms** (median) and **503 ms** (worst of 5) after `kill -9` of the
+   leader. That figure is set by the client's 500 ms request timeout, not by the election.
+3. ✗ Batching gave **3.4×**, not 2×. With one entry per RPC, followers also sync once per
+   entry, and replication takes a round trip per entry.
 
 ## 8. Risks, and what to do about them
 

@@ -877,6 +877,26 @@ Filled in and committed in `raftkv.md` §7 before any measurement: throughput dr
 25% from 3 to 5 nodes; leader recovery under 1000 ms; batching about 2×. The 20%-drop cost
 was already measured in Phase 7, and is marked as such rather than predicted.
 
+*As built* (`apps/raftkvload.cpp`, `bench/micro_bench.cpp`, `tools/bench/run_all.py`,
+`tools/results_table.py`):
+
+- **Commit order:** the tooling was committed first (`f5de2d4`), then the predictions
+  (`36cbbb8`), and only then was anything measured. While building the tools, their checks
+  only looked at exit codes and row names, never values.
+- **The experiments:** real processes on this laptop; `raftkvload` drives closed-loop
+  clients; each throughput figure is the median of three 10 s runs. The 20%-drop row comes
+  from the simulator and says so. `docs/results.csv` names the machine.
+- **The README's results are generated** from the CSV by `tools/results_table.py`. That
+  includes the prediction verdicts and the explanatory paragraph, whose numbers are
+  computed. CI's lint job fails if the README and the CSV disagree.
+- **Outcome:** 1 of 3 predictions held. Recovery stayed under 1000 ms (495 ms median, set
+  by the client's 500 ms timeout). 3 → 5 nodes cost 7.3%, not 25%. Batching gave 3.4×, not
+  2×.
+- **The main finding:** durable writes are fsync-bound. One `F_FULLFSYNC` takes 4 ms, the
+  leader syncs once per proposal, and a node tops out near 250 writes/s. Without fsync the
+  cluster does ~120,000 ops/s. Group commit, and a shorter, adaptive client timeout, are
+  the clear next steps.
+
 ---
 
 ## Phase 10 — Write-up and demo
@@ -920,17 +940,20 @@ a gRPC front end → multi-Raft sharding.
 
 ## What this produces for the résumé
 
-Written only once the numbers exist — no placeholders:
+Written only once the numbers exist — no placeholders. Filled in after Phase 9 from the
+measurements (`docs/results.csv`):
 
-- *"Implemented Raft consensus from the paper in **C++20** (N lines, M tests): leader
+- *"Implemented Raft consensus from the paper in **C++20** (3.8k lines, 131 tests): leader
   election, log replication, crash recovery, snapshotting — verified linearizable by
-  Porcupine across 100 seeded fault runs, zero acknowledged writes lost."*
+  Porcupine across 540 seeded fault-injected histories (297k operations), zero
+  acknowledged writes lost."*
 - *"Built a deterministic simulator (virtual clock, seeded network) so every failure
-  replays from a seed; ASan/UBSan/TSan clean in CI and the log decoder fuzzed to N million
-  cases."*
-- *"Measured failover: a 3-node cluster resumed writes ___ ms after the leader was killed;
-  throughput fell ___% at 5 nodes, and a minority partition degraded rather than stopped
-  service."*
+  replays from a seed; ASan/UBSan/TSan clean in CI, and the log decoder fuzzed at over a
+  million cases per 60 s run."*
+- *"Measured failover: a 3-node cluster resumed writes 495 ms (median) after `kill -9` of
+  the leader; throughput fell 7.3% from 3 to 5 nodes; stopping one of three servers did not
+  reduce throughput. Found that durable writes were fsync-bound (4 ms per `F_FULLFSYNC`,
+  555× slower than without), which pointed to group commit as the next step."*
 
 All three are claims about **failure behavior and safety evidence** — what the C++ and infra
 postings screen for, and what nothing else on the record currently says.

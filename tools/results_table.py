@@ -47,7 +47,7 @@ def render():
                f"{get('machine', 'memory', 'size')} GiB, {get('machine', 'os', 'name')}, "
                f"on {get('machine', 'date', 'measured')}. Real `raftkvd` processes on one machine, driven by "
                "`raftkvload` (closed-loop clients, 16-byte values), durable fsync unless stated. "
-               "Throughput figures are the median of three 10 s runs. They compare configurations "
+               "Throughput figures are the median of three 10 s runs (the build-type rows are single runs). They compare configurations "
                "on this laptop; they are not a claim about production hardware.")
     out.append("")
 
@@ -104,6 +104,41 @@ def render():
         out.append("")
         out.append(f"One log append plus sync takes {num(a1)} µs with fsync and {num(a0, 1)} µs without, "
                    "which is the floor on every committed write's latency.")
+
+    # The predictions, committed in raftkv.md §7 before any of this was measured.
+    t3, t5 = get("cluster_size", "3 nodes", "ops_per_sec"), get("cluster_size", "5 nodes", "ops_per_sec")
+    fmax = get("leader_failover", next(iter(variants("leader_failover")), ""), "max")
+    fmed = get("leader_failover", next(iter(variants("leader_failover")), ""), "median")
+    if t3 and t5 and fmax and b1 and b64:
+        drop = 100 * (1 - float(t5) / float(t3))
+        ratio = float(b64) / float(b1)
+        verdict = lambda ok: "✓ held" if ok else "✗ wrong"
+        out.append("")
+        out.append("**Predictions**, committed before measuring ([`raftkv.md`](raftkv.md) §7):")
+        out.append("")
+        out.append("| Prediction | Measured | Verdict |")
+        out.append("|---|---|---|")
+        out.append(f"| 3 → 5 nodes costs about 25% of write throughput | {drop:.1f}% | "
+                   f"{verdict(abs(drop - 25) <= 10)}: much smaller |" if abs(drop - 25) > 10 else
+                   f"| 3 → 5 nodes costs about 25% of write throughput | {drop:.1f}% | {verdict(True)} |")
+        out.append(f"| Writes resume within 1000 ms of `kill -9` of the leader | median {num(fmed)} ms, max {num(fmax)} ms | "
+                   f"{verdict(float(fmax) < 1000)} |")
+        out.append(f"| Batching gives about 2× | {ratio:.1f}× | "
+                   + (f"{verdict(False)}: {'underestimated' if ratio > 2 else 'overestimated'} |" if abs(ratio - 2) > 0.5
+                      else f"{verdict(True)} |"))
+        if a1 and f0 and f1:
+            ceiling = 1e6 / float(a1)
+            out.append("")
+            out.append(
+                f"**What the numbers say.** Every write is bound by fsync. One append plus `F_FULLFSYNC` takes "
+                f"{float(a1) / 1000:.2f} ms, a ceiling of about {ceiling:,.0f} syncs per second, and a single node "
+                f"reaches {num(get('cluster_size', '1 node', 'ops_per_sec'))} ops/s: the leader syncs once per "
+                f"proposal, with no group commit across concurrent requests. Without fsync the same cluster does "
+                f"{num(f0)} ops/s. That is why extra followers cost so little (followers sync in parallel with each other), why sanitizer "
+                f"builds are barely slower, and why batching matters more than predicted: with one entry per RPC, "
+                f"followers sync once per entry too. Leader recovery is set by the client's 500 ms request timeout, "
+                f"not by the election (150–300 ms): the request in flight to the dead leader has to time out first. "
+                f"Group commit and a shorter, adaptive client timeout are the two obvious next steps.")
     return "\n".join(out)
 
 
