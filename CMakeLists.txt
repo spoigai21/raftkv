@@ -72,6 +72,9 @@ target_link_libraries(raftkvd PRIVATE raftkv raftkv_warnings)
 add_executable(raftkvctl apps/raftkvctl.cpp)
 target_link_libraries(raftkvctl PRIVATE raftkv raftkv_warnings)
 
+add_executable(raftkvload apps/raftkvload.cpp)
+target_link_libraries(raftkvload PRIVATE raftkv raftkv_warnings)
+
 if(RAFTKV_BUILD_TESTS)
     enable_testing()
     find_package(GTest CONFIG REQUIRED)
@@ -122,6 +125,6 @@ endif()
 if(RAFTKV_BUILD_BENCH)
     find_package(benchmark CONFIG REQUIRED)
 
-    add_executable(raftkv_bench bench/smoke_bench.cpp)
+    add_executable(raftkv_bench bench/smoke_bench.cpp bench/micro_bench.cpp)
     target_link_libraries(raftkv_bench PRIVATE raftkv raftkv_warnings benchmark::benchmark_main)
 endif()

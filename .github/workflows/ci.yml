@@ -16,6 +16,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Determinism lint (implementation guide §3.2)
         run: tools/check_determinism.sh
+      - name: README results match docs/results.csv
+        run: python3 tools/results_table.py --check
       - uses: actions/setup-go@v5
         with:
           go-version-file: tools/lincheck/go.mod
