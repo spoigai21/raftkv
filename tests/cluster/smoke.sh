@@ -119,9 +119,14 @@ while read -r piece; do
 done <"$ACKED"
 echo "   $N_ACKED acknowledged appends all survived, once each, in order"
 
-echo "== 4. a corrupted log makes the node refuse to start"
+echo "== 4. corrupted durable state makes the node refuse to start"
 kill9 3
+# Corrupt the middle of synced data. Right after a snapshot the log can be empty (and a byte
+# written into an empty log is only a torn tail, which recovery rightly cuts off), so use the
+# snapshot file then. A damaged snapshot must make the node refuse to start just the same.
 LOG=$WORK/data3/log
+[[ $(wc -c <"$LOG" | tr -d ' ') -gt 0 ]] || LOG=$WORK/data3/snapshot
+[[ -s $LOG ]] || fail "node 3 has neither a log nor a snapshot to corrupt"
 SIZE=$(wc -c <"$LOG" | tr -d ' ')
 AT=$((SIZE / 2))
 BEFORE=$(od -An -tx1 -j "$AT" -N1 "$LOG" | tr -d ' ')
@@ -132,8 +137,8 @@ AFTER=$(od -An -tx1 -j "$AT" -N1 "$LOG" | tr -d ' ')
 [[ $AFTER == "$NEW" ]] || fail "could not corrupt byte $AT of a $SIZE-byte log (was $BEFORE, now $AFTER)"
 "$RAFTKVD" --id 3 --cluster "$CLUSTER" --data-dir "$WORK/data3" --snapshot-every 20 >>"$WORK/node3.log" 2>&1 &
 P3=$!
-if ! wait_exit $P3 10; then kill -9 $P3; fail "node 3 is running on a corrupt log (log size $SIZE)"; fi
-[[ $RC -eq 1 ]] || fail "node 3 started on a corrupt log (exit $RC)"
+if ! wait_exit $P3 10; then kill -9 $P3; fail "node 3 is running on a corrupt $(basename "$LOG") ($SIZE bytes)"; fi
+[[ $RC -eq 1 ]] || fail "node 3 started on a corrupt $(basename "$LOG") (exit $RC)"
 grep -q "refusing to start" "$WORK/node3.log" || fail "no refusal message"
 [[ $(ctl put after-corruption yes) == OK ]] || fail "the other two stopped serving"
 
