@@ -119,11 +119,21 @@ and benchmarks make it stronger, not valid.
 Written down and committed to git *before* Phase 9, then confirmed or refuted in the
 write-up — the same honesty structure as swing and CineInfer.
 
-1. Write throughput drops ___% going from 3 nodes to 5.
-2. Recovery after a leader kill completes in under ___ ms.
-3. Batching entries per RPC improves throughput by ___×.
-4. A 20% message-drop rate costs less than ___% throughput.
-5. The linearizability checker finds at least one real bug that the unit tests missed.
+Committed on 2026-10-03, after the benchmark tooling (`f5de2d4`) and before any measurement.
+Setup: 3 or 5 `raftkvd` processes on this laptop, 32 closed-loop clients, durable fsync.
+
+1. Write throughput drops **about 25%** going from 3 nodes to 5.
+2. Recovery after `kill -9` of the leader completes in **under 1000 ms**.
+3. Batching up to 64 entries per `AppendEntries` improves throughput by **about 2×** over one
+   entry per RPC.
+4. *(Not a prediction; already measured.)* A 20% message-drop rate costs less than ___%
+   throughput. Phase 7's fault matrix measured it before this list was filled in: in the
+   simulator, 20% drops kept **5.2%** of normal throughput, i.e. cost about 95%.
+5. *(Not a prediction; unresolved so far.)* The linearizability checker finds at least one
+   real bug that the unit tests missed. **So far it has not.** Of the two real bugs found:
+   the invariant checker found postmortem 001, a bug in the checker itself; the repeated
+   real-process test found postmortem 002, in the transport. The checker has caught every
+   planted bug.
 
 Prediction 5 is the interesting one: if it is wrong, that is a result worth reporting too.
 

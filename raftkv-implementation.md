@@ -873,10 +873,9 @@ so the write-up cannot drift (the `--check` pattern from swing).
 
 ### Predictions, committed before measuring
 
-1. Write throughput drops ___% from 3 to 5 nodes.
-2. Recovery after leader kill is under ___ ms.
-3. Batching improves throughput ___×.
-4. A 20% drop rate costs less than ___% throughput.
+Filled in and committed in `raftkv.md` §7 before any measurement: throughput drops about
+25% from 3 to 5 nodes; leader recovery under 1000 ms; batching about 2×. The 20%-drop cost
+was already measured in Phase 7, and is marked as such rather than predicted.
 
 ---
 
