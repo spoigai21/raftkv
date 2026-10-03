@@ -19,6 +19,9 @@ struct RaftConfig {
     Duration election_timeout_max{300'000};
     Duration heartbeat_interval{50'000};
     std::size_t max_entries_per_append = 64;
+    // Group commit: proposals are appended without syncing, and one sync, in an event of its
+    // own, covers every proposal that arrived meanwhile. Off: each proposal syncs on its own.
+    bool group_commit = true;
     // Take a snapshot once this many applied entries have built up since the last one
     // (implementation guide Phase 8). 0: never, and the log grows without bound.
     Index snapshot_every = 0;
@@ -77,7 +80,7 @@ public:
     Index snapshot_index() const { return log_.front().index; }
 
 private:
-    enum : TimerTag { kElectionTimer = 1, kHeartbeatTimer = 2, kApplyTimer = 3 };
+    enum : TimerTag { kElectionTimer = 1, kHeartbeatTimer = 2, kApplyTimer = 3, kFlushTimer = 4 };
 
     void handle(NodeId from, const RequestVote& r);
     void handle(NodeId from, const RequestVoteReply& r);
@@ -97,6 +100,8 @@ private:
     // Leader: commits the newest entry from the current term that a majority stores (§5.4.2).
     void advance_commit_index();
     void set_commit_index(Index index);
+    // Group commit: sync what propose() appended, then count it and send it on.
+    void flush_proposals();
     void apply_committed();
     void maybe_take_snapshot();
     // Replaces log entries up to s.last_included_index with the snapshot, in memory.
@@ -142,6 +147,8 @@ private:
     std::optional<TimerId> election_timer_;
     std::optional<TimerId> heartbeat_timer_;
     std::optional<TimerId> apply_timer_;
+    std::optional<TimerId> flush_timer_;
+    Index unflushed_from_ = 0;   // first proposal appended since the last flush
 };
 
 const char* to_string(Role r);

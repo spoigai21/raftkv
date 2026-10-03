@@ -1,11 +1,12 @@
 // raftkvd: one raftkv server process.
 //
 //   raftkvd --id 1 --cluster cluster.json --data-dir data/1 [--snapshot-every N]
-//           [--max-batch N] [--unsafe-no-fsync]
+//           [--max-batch N] [--no-group-commit] [--unsafe-no-fsync]
 //
 // --snapshot-every N (default 1000) compacts the log after every N applied entries; 0 keeps
 // the whole log forever. --max-batch N caps entries per AppendEntries (default 64; 1 turns
-// batching off). --unsafe-no-fsync skips every fsync: data survives a crashed process but
+// batching off). --no-group-commit makes every proposal sync on its own (for comparison).
+// --unsafe-no-fsync skips every fsync: data survives a crashed process but
 // not a crashed machine. It exists only to measure what fsync costs.
 //
 // Runs kv::Server (Raft + the key-value state machine) on FileStorage, talking to its peers
@@ -31,7 +32,7 @@ namespace {
 int usage() {
     std::fprintf(stderr,
                  "usage: raftkvd --id N --cluster FILE --data-dir DIR [--snapshot-every N] [--max-batch N]\n"
-                 "               [--unsafe-no-fsync]\n");
+                 "               [--no-group-commit] [--unsafe-no-fsync]\n");
     return 2;
 }
 
@@ -43,11 +44,16 @@ int main(int argc, char** argv) {
     std::uint64_t snapshot_every = 1000;
     std::size_t max_batch = 64;
     bool no_fsync = false;
+    bool group_commit = true;
     std::string cluster_file, data_dir;
     for (int i = 1; i < argc; ++i) {
         const std::string_view flag = argv[i];
         if (flag == "--unsafe-no-fsync") {
             no_fsync = true;
+            continue;
+        }
+        if (flag == "--no-group-commit") {
+            group_commit = false;
             continue;
         }
         if (i + 1 >= argc) return usage();
@@ -92,6 +98,7 @@ int main(int argc, char** argv) {
     raft::RaftConfig config{.id = id, .peers = {}};
     config.snapshot_every = snapshot_every;
     config.max_entries_per_append = max_batch;
+    config.group_commit = group_commit;
     for (const auto& [peer, endpoint] : *cluster) {
         if (peer != id) config.peers.push_back(peer);
     }

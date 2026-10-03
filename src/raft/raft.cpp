@@ -61,13 +61,28 @@ void Raft::on_timer(TimerId id, TimerTag tag) {
     } else if (tag == kApplyTimer && apply_timer_ == id) {
         apply_timer_.reset();
         apply_committed();
+    } else if (tag == kFlushTimer && flush_timer_ == id) {
+        flush_timer_.reset();
+        flush_proposals();
     }
 }
 
 ProposeResult Raft::propose(std::string command) {
     if (role_ != Role::Leader) return {.accepted = false, .index = 0, .term = 0, .leader_hint = leader_};
     const Index index = last_log_index() + 1;
-    append_durably({LogEntry{.term = current_term_, .index = index, .command = std::move(command)}});
+    LogEntry e{.term = current_term_, .index = index, .command = std::move(command)};
+    if (config_.group_commit) {
+        // Appended but not synced, so not counted yet. Proposals that arrive before the flush
+        // event runs share its one sync.
+        env_.storage().append({&e, 1});
+        log_.push_back(std::move(e));
+        if (!flush_timer_) {
+            unflushed_from_ = index;
+            flush_timer_ = env_.after(Duration{0}, kFlushTimer);
+        }
+        return {.accepted = true, .index = index, .term = current_term_, .leader_hint = config_.id};
+    }
+    append_durably({std::move(e)});
     match_index_[config_.id] = index;
     advance_commit_index();   // a one-node cluster commits at once
     for (NodeId peer : config_.peers) {
@@ -75,6 +90,21 @@ ProposeResult Raft::propose(std::string command) {
         if (next_index_[peer] == index) replicate_to(peer);
     }
     return {.accepted = true, .index = index, .term = current_term_, .leader_hint = config_.id};
+}
+
+void Raft::flush_proposals() {
+    // Durable first; only then may the leader count its own copy toward a majority (the same
+    // rule as before group commit, just applied to a batch). Followers may already have been
+    // sent some of these entries: that is safe, as their acks count only for themselves.
+    env_.storage().sync();
+    if (role_ != Role::Leader) return;   // deposed meanwhile: the entries stay, synced, uncounted
+    match_index_[config_.id] = last_log_index();
+    advance_commit_index();   // a one-node cluster commits here
+    for (NodeId peer : config_.peers) {
+        // Peers that were caught up get the whole batch in one AppendEntries; the others pick
+        // it up from their reply chain.
+        if (next_index_[peer] == unflushed_from_) replicate_to(peer);
+    }
 }
 
 // ---- RequestVote -------------------------------------------------------------------------
