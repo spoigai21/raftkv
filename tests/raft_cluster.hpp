@@ -33,7 +33,7 @@ struct ClusterOptions {
     bool kv = false;   // servers are kv::Server (Raft + state machine) instead of bare Raft
     int clients = 0;   // kv::Client nodes, ids 101, 102, ...; partitions never cut them off
     raft::Index snapshot_every = 0;   // RaftConfig::snapshot_every (KV servers only); 0: never
-    std::optional<raft::Duration> client_timeout;   // a fixed client timeout instead of adaptive
+    std::optional<raft::Duration> client_timeout{};   // a fixed client timeout instead of adaptive
 };
 
 class RaftCluster {
