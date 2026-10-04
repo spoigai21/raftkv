@@ -168,8 +168,13 @@ TEST(RaftReplication, ChaosWithWorkloadKeepsEveryInvariantAndConverges) {
 struct LeaderRig {
     LeaderRig()
         : sim(1, {1, 2, 3}, [](NodeId id, raft::Env& env) -> std::unique_ptr<raft::Node> {
-              if (id == 1) return std::make_unique<raft::Raft>(raft::RaftConfig{.id = 1, .peers = {2, 3}}, env);
-              return std::make_unique<test::ProbeNode>(env);
+              if (id != 1) return std::make_unique<test::ProbeNode>(env);
+              // The probes play the other servers by hand; these tests are about the commit
+              // rule, so node 1 runs a plain election and does not check for a quorum.
+              raft::RaftConfig cfg{.id = 1, .peers = {2, 3}};
+              cfg.pre_vote = false;
+              cfg.check_quorum = false;
+              return std::make_unique<raft::Raft>(cfg, env);
           }) {
         sim.describe_messages_with(raft::describe);
     }

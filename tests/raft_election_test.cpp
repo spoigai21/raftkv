@@ -72,10 +72,12 @@ TEST(RaftElection, OldLeaderStepsDownWhenPartitionHeals) {
         c.sim().faults().partitions = {{old}, rest};
         c.sim().run_for(2s);
 
-        // The majority side has moved on; the old leader, alone, still believes it leads.
+        // The majority side has moved on. The old leader, alone, has stopped leading too:
+        // CheckQuorum makes it step down once it cannot hear a majority. Thanks to PreVote it
+        // has not inflated its term trying to win one back.
         ASSERT_TRUE(c.leader().has_value()) << c.context();
         EXPECT_NE(*c.leader(), old);
-        EXPECT_EQ(c.raft(old)->role(), Role::Leader);
+        EXPECT_NE(c.raft(old)->role(), Role::Leader) << "CheckQuorum should have deposed it";
         EXPECT_LT(c.raft(old)->current_term(), c.raft(*c.leader())->current_term());
 
         c.sim().faults().partitions.clear();
@@ -104,8 +106,8 @@ TEST(RaftElection, GoldenChaosRunMatchesAcrossPlatforms) {
     c.schedule_chaos(42, 5s);
     c.sim().start();
     c.sim().run_until(raft::Time{8s});
-    EXPECT_EQ(c.sim().event_log().size(), 2644u);
-    EXPECT_EQ(c.sim().log_hash(), 7430155566530532704ULL);
+    EXPECT_EQ(c.sim().event_log().size(), 2683u);
+    EXPECT_EQ(c.sim().log_hash(), 15988915225468548236ULL);
 }
 
 // ---- beyond the gate ---------------------------------------------------------------------
@@ -128,11 +130,35 @@ TEST(RaftElection, NoQuorumMeansNoLeader) {
     c.sim().crash(2);
     c.sim().crash(3);
     c.sim().run_for(5s);
-    EXPECT_EQ(c.raft(1)->role(), Role::Candidate);
-    EXPECT_GT(c.raft(1)->current_term(), 5u);   // it keeps trying, with rising terms
+    EXPECT_NE(c.raft(1)->role(), Role::Leader);
+    // PreVote: it keeps asking, but never raises its term without a majority behind it.
+    EXPECT_EQ(c.raft(1)->current_term(), 0u);
     c.sim().restart(2);
     EXPECT_TRUE(c.wait_for_leader(2s)) << c.context();
     EXPECT_SAFE(c);
+}
+
+// PreVote's other half: a follower that stops hearing the leader asks for pre-votes, and a
+// node that still hears the leader must refuse, even though the asker's log is just as up to
+// date (the cluster is idle). Only the leader -> node link is slowed, past the election
+// timeout; everything else is healthy, so nothing should change.
+TEST(RaftElection, PreVoteProtectsAHealthyLeader) {
+    for (std::uint64_t seed : seeds(20)) {
+        RaftCluster c(seed, 3);
+        c.sim().start();
+        ASSERT_TRUE(c.wait_for_leader(2s)) << c.context();
+        c.sim().run_for(500ms);
+        const NodeId leader = *c.leader();
+        const raft::Term term = c.raft(leader)->current_term();
+        const NodeId deaf = leader == 3 ? 2 : 3;
+        c.sim().faults().link_delay[{leader, deaf}] = 1s;
+        c.sim().run_for(2s);
+        EXPECT_EQ(c.leader(), leader) << "seed " << seed << "\n" << c.context();
+        for (NodeId id : c.ids()) {
+            EXPECT_EQ(c.raft(id)->current_term(), term) << "node " << id << " raised its term (seed " << seed << ")";
+        }
+        EXPECT_SAFE(c);
+    }
 }
 
 TEST(RaftElection, FiveNodesSurviveTwoFailures) {

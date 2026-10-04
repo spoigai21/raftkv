@@ -31,12 +31,14 @@ struct Encoder {
         pb.set_candidate_id(r.candidate_id);
         pb.set_last_log_index(r.last_log_index);
         pb.set_last_log_term(r.last_log_term);
+        pb.set_pre_vote(r.pre_vote);
         return {.from = 0, .to = to, .method = std::string(kRequestVote), .payload = serialize(pb)};
     }
     Message operator()(const RequestVoteReply& r) const {
         pb::RequestVoteReply pb;
         pb.set_term(r.term);
         pb.set_vote_granted(r.vote_granted);
+        pb.set_pre_vote(r.pre_vote);
         return {.from = 0, .to = to, .method = std::string(kRequestVoteReply), .payload = serialize(pb)};
     }
     Message operator()(const AppendEntries& r) const {
@@ -98,12 +100,13 @@ tl::expected<Rpc, std::string> parse(const Message& m) {
         return decode_pb<pb::RequestVote>(m).map([](const pb::RequestVote& pb) -> Rpc {
             return RequestVote{.term = pb.term(), .candidate_id = pb.candidate_id(),
                                .last_log_index = pb.last_log_index(),
-                               .last_log_term = pb.last_log_term()};
+                               .last_log_term = pb.last_log_term(), .pre_vote = pb.pre_vote()};
         });
     }
     if (m.method == kRequestVoteReply) {
         return decode_pb<pb::RequestVoteReply>(m).map([](const pb::RequestVoteReply& pb) -> Rpc {
-            return RequestVoteReply{.term = pb.term(), .vote_granted = pb.vote_granted()};
+            return RequestVoteReply{.term = pb.term(), .vote_granted = pb.vote_granted(),
+                                    .pre_vote = pb.pre_vote()};
         });
     }
     if (m.method == kAppendEntries) {
@@ -147,10 +150,12 @@ namespace {
 
 struct Describer {
     std::string operator()(const RequestVote& r) const {
-        return std::format("RequestVote term={} last={}/{}", r.term, r.last_log_index, r.last_log_term);
+        return std::format("{} term={} last={}/{}", r.pre_vote ? "PreVote" : "RequestVote", r.term,
+                           r.last_log_index, r.last_log_term);
     }
     std::string operator()(const RequestVoteReply& r) const {
-        return std::format("RequestVoteReply term={} granted={}", r.term, r.vote_granted);
+        return std::format("{} term={} granted={}", r.pre_vote ? "PreVoteReply" : "RequestVoteReply", r.term,
+                           r.vote_granted);
     }
     std::string operator()(const AppendEntries& r) const {
         return std::format("AppendEntries term={} prev={}/{} n={} commit={}", r.term,

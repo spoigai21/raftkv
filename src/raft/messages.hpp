@@ -17,11 +17,15 @@ struct RequestVote {
     NodeId candidate_id = 0;
     Index last_log_index = 0;
     Term last_log_term = 0;
+    // PreVote (Ongaro's thesis §9.6): asks whether the receiver would vote for this candidate in
+    // `term`, without the receiver changing its term or vote.
+    bool pre_vote = false;
 };
 
 struct RequestVoteReply {
     Term term = 0;
     bool vote_granted = false;
+    bool pre_vote = false;
 };
 
 struct AppendEntries {

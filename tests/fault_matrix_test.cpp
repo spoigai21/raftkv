@@ -211,9 +211,9 @@ TEST(FaultMatrix, FollowerCrashAndRestart) {
 // 500 ms extra delay on one follower's link, compared with the same seed without it.
 // The plan's row says "p50 unchanged". Measured, it depends on which direction is slow:
 //   a. only its replies to the leader are slow: stable, the median rises by about 12%;
-//   b. both directions: the delay exceeds the election timeout, so without PreVote the
-//      slow follower keeps calling elections. The median holds, but throughput dips (by up
-//      to about 21% over 20 seeds).
+//   b. both directions: the delay exceeds the election timeout, so the slow follower keeps
+//      timing out. Before PreVote it then forced an election every time (98 over 20 seeds, up
+//      to 22% throughput lost). With PreVote the others, still hearing the leader, refuse.
 struct SlowResult {
     double p50_ms = 0;
     std::size_t ops = 0;
@@ -272,8 +272,8 @@ TEST(FaultMatrix, SlowFollowerLinkBothWays) {
     report_slow("slow link both ways", p50_change, ops_change);
     std::printf("[ matrix ] slow link both ways: %llu extra elections in total\n",
                 static_cast<unsigned long long>(elections));
-    // Documented limitation (no PreVote), asserted so the day it changes is noticed.
-    EXPECT_GT(elections, 0u) << "no extra elections: has PreVote been added? update the README row";
+    // PreVote: the slow follower may ask, but the others still hear the leader and refuse.
+    EXPECT_EQ(elections, 0u) << "a slow follower forced elections: is PreVote working?";
 }
 
 // ---- 6. Message drops ---------------------------------------------------------------------

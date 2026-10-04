@@ -17,11 +17,13 @@ message RequestVote {
   uint32 candidate_id = 2;
   uint64 last_log_index = 3;
   uint64 last_log_term = 4;
+  bool pre_vote = 5;   // "would you vote for me in this term?" Changes nothing on the receiver.
 }
 
 message RequestVoteReply {
   uint64 term = 1;
   bool vote_granted = 2;
+  bool pre_vote = 3;   // answers a pre-vote
 }
 
 message AppendEntries {

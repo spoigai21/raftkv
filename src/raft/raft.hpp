@@ -22,6 +22,13 @@ struct RaftConfig {
     // Group commit: proposals are appended without syncing, and one sync, in an event of its
     // own, covers every proposal that arrived meanwhile. Off: each proposal syncs on its own.
     bool group_commit = true;
+    // PreVote (Ongaro's thesis §9.6): before raising its term, a node asks whether it could
+    // win. Nodes that heard from a leader within election_timeout_min say no, so a node coming
+    // back from a partition, or a slow one, cannot force an election.
+    bool pre_vote = true;
+    // CheckQuorum: a leader that has not heard from a majority within election_timeout_max
+    // steps down, so a leader cut off from the others stops taking requests.
+    bool check_quorum = true;
     // Take a snapshot once this many applied entries have built up since the last one
     // (implementation guide Phase 8). 0: never, and the log grows without bound.
     Index snapshot_every = 0;
@@ -89,7 +96,10 @@ private:
     void handle(NodeId from, const InstallSnapshot& r);
     void handle(NodeId from, const InstallSnapshotReply& r);
 
+    void start_pre_vote();
     void start_election();
+    // A leader that lost touch with the majority becomes a follower, in the same term.
+    void lose_leadership();
     void become_leader();
     // Adopts a newer term seen in any RPC: back to follower, vote cleared, persisted.
     void step_down(Term term);
@@ -142,6 +152,11 @@ private:
     Index commit_index_ = 0;
     Index last_applied_ = 0;
     std::set<NodeId> votes_;                  // candidate only
+    bool pre_voting_ = false;                 // asking for pre-votes for current_term_ + 1
+    std::set<NodeId> pre_votes_;
+    std::optional<Time> leader_contact_;      // when we last heard from a valid leader
+    std::map<NodeId, Time> last_ack_;         // leader only: last reply from each peer
+    Time leader_since_{};
     std::map<NodeId, Index> next_index_;      // leader only
     std::map<NodeId, Index> match_index_;     // leader only
     std::optional<TimerId> election_timer_;

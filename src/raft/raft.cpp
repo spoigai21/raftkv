@@ -54,7 +54,10 @@ void Raft::on_message(const Message& m) {
 void Raft::on_timer(TimerId id, TimerTag tag) {
     if (tag == kElectionTimer && election_timer_ == id) {
         election_timer_.reset();
-        if (role_ != Role::Leader) start_election();
+        if (role_ != Role::Leader) {
+            if (config_.pre_vote) start_pre_vote();
+            else start_election();
+        }
     } else if (tag == kHeartbeatTimer && heartbeat_timer_ == id) {
         heartbeat_timer_.reset();
         if (role_ == Role::Leader) replicate_to_all();
@@ -114,6 +117,17 @@ void Raft::handle(NodeId from, const RequestVote& r) {
         env_.trace(std::format("dropped RequestVote from {} claiming to be {}", from, r.candidate_id));
         return;
     }
+    if (r.pre_vote) {
+        // Would we vote for this candidate in r.term? Nothing changes here: not our term, not
+        // our vote, not our timer. No, if a leader is alive as far as we can tell.
+        const bool leader_alive =
+            role_ == Role::Leader ||
+            (leader_contact_ && env_.now() - *leader_contact_ < config_.election_timeout_min);
+        const bool grant = r.term > current_term_ && !leader_alive &&
+                           candidate_log_is_up_to_date(r.last_log_index, r.last_log_term);
+        send(from, RequestVoteReply{.term = current_term_, .vote_granted = grant, .pre_vote = true});
+        return;
+    }
     if (r.term > current_term_) step_down(r.term);
 
     const bool grant = r.term == current_term_ &&
@@ -131,6 +145,12 @@ void Raft::handle(NodeId from, const RequestVote& r) {
 void Raft::handle(NodeId from, const RequestVoteReply& r) {
     if (r.term > current_term_) {
         step_down(r.term);
+        return;
+    }
+    if (r.pre_vote) {
+        if (!pre_voting_ || !r.vote_granted) return;
+        pre_votes_.insert(from);
+        if (pre_votes_.size() >= majority()) start_election();
         return;
     }
     if (role_ != Role::Candidate || r.term != current_term_ || !r.vote_granted) return;
@@ -156,6 +176,8 @@ void Raft::handle(NodeId from, const AppendEntries& r) {
         leader_ = from;
         env_.trace(std::format("leader is {} term={}", from, current_term_));
     }
+    leader_contact_ = env_.now();
+    pre_voting_ = false;
     reset_election_timer();
 
     // Consistency check: we must hold prev_log_index with the same term. Entries our snapshot
@@ -202,6 +224,7 @@ void Raft::handle(NodeId from, const AppendEntriesReply& r) {
         return;
     }
     if (role_ != Role::Leader || r.term != current_term_) return;   // stale
+    last_ack_[from] = env_.now();
 
     Index& next = next_index_[from];
     Index& match = match_index_[from];
@@ -237,6 +260,8 @@ void Raft::handle(NodeId from, const InstallSnapshot& r) {
     if (r.term > current_term_) step_down(r.term);
     if (role_ == Role::Candidate) role_ = Role::Follower;
     leader_ = from;
+    leader_contact_ = env_.now();
+    pre_voting_ = false;
     reset_election_timer();
 
     const Snapshot& s = r.snapshot;
@@ -271,6 +296,7 @@ void Raft::handle(NodeId from, const InstallSnapshotReply& r) {
         return;
     }
     if (role_ != Role::Leader || r.term != current_term_) return;
+    last_ack_[from] = env_.now();
     Index& match = match_index_[from];
     Index& next = next_index_[from];
     match = std::max(match, r.match_index);
@@ -297,6 +323,18 @@ void Raft::replicate_to(NodeId peer) {
 }
 
 void Raft::replicate_to_all() {
+    if (config_.check_quorum && env_.now() - leader_since_ >= config_.election_timeout_max) {
+        // CheckQuorum: count ourselves plus every peer that replied within an election timeout.
+        std::size_t in_touch = 1;
+        for (NodeId peer : config_.peers) {
+            auto it = last_ack_.find(peer);
+            in_touch += it != last_ack_.end() && env_.now() - it->second < config_.election_timeout_max;
+        }
+        if (in_touch < majority()) {
+            lose_leadership();
+            return;
+        }
+    }
     for (NodeId peer : config_.peers) replicate_to(peer);
     cancel_timer(heartbeat_timer_);
     heartbeat_timer_ = env_.after(config_.heartbeat_interval, kHeartbeatTimer);
@@ -353,7 +391,34 @@ void Raft::compact_to(const Snapshot& s) {
 
 // ---- role changes ------------------------------------------------------------------------
 
+void Raft::start_pre_vote() {
+    pre_voting_ = true;
+    pre_votes_ = {config_.id};
+    leader_.reset();
+    reset_election_timer();   // if this round fails, try again later
+    if (pre_votes_.size() >= majority()) {   // a one-node cluster
+        start_election();
+        return;
+    }
+    env_.trace(std::format("pre-vote for term={}", current_term_ + 1));
+    const RequestVote rv{.term = current_term_ + 1, .candidate_id = config_.id,
+                         .last_log_index = last_log_index(), .last_log_term = last_log_term(), .pre_vote = true};
+    for (NodeId peer : config_.peers) send(peer, rv);
+}
+
+void Raft::lose_leadership() {
+    role_ = Role::Follower;
+    leader_.reset();
+    next_index_.clear();
+    match_index_.clear();
+    last_ack_.clear();
+    cancel_timer(heartbeat_timer_);
+    reset_election_timer();
+    env_.trace(std::format("lost touch with the majority: stepping down in term={}", current_term_));
+}
+
 void Raft::start_election() {
+    pre_voting_ = false;
     ++current_term_;
     role_ = Role::Candidate;
     voted_for_ = config_.id;
@@ -375,6 +440,8 @@ void Raft::start_election() {
 void Raft::become_leader() {
     role_ = Role::Leader;
     leader_ = config_.id;
+    leader_since_ = env_.now();
+    last_ack_.clear();
     votes_.clear();
     cancel_timer(election_timer_);
     next_index_.clear();
@@ -400,8 +467,10 @@ void Raft::step_down(Term term) {
     role_ = Role::Follower;
     leader_.reset();
     votes_.clear();
+    pre_voting_ = false;
     next_index_.clear();
     match_index_.clear();
+    last_ack_.clear();
     persist_hard_state();
     if (was == Role::Leader) {
         cancel_timer(heartbeat_timer_);
