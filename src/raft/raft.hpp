@@ -159,6 +159,9 @@ private:
     Time leader_since_{};
     std::map<NodeId, Index> next_index_;      // leader only
     std::map<NodeId, Index> match_index_;     // leader only
+    // Leader only: the last index sent to each peer. Above match_index_, an AppendEntries is
+    // outstanding, and its reply will carry on from there.
+    std::map<NodeId, Index> sent_index_;
     std::optional<TimerId> election_timer_;
     std::optional<TimerId> heartbeat_timer_;
     std::optional<TimerId> apply_timer_;

@@ -87,6 +87,7 @@ private:
     std::map<raft::NodeId, Peer> peers_;   // outgoing connections to other servers
     std::map<raft::NodeId, std::weak_ptr<Connection>> inbound_;   // latest connection per sender
     std::map<Connection*, std::shared_ptr<Connection>> connections_;   // every open connection
+    // Live timers; a null pointer is a zero-delay one, posted rather than timed.
     std::map<raft::TimerId, std::unique_ptr<asio::steady_timer>> timers_;
     raft::TimerId next_timer_ = 0;
     bool stopped_ = false;

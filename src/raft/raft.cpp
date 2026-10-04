@@ -104,9 +104,10 @@ void Raft::flush_proposals() {
     match_index_[config_.id] = last_log_index();
     advance_commit_index();   // a one-node cluster commits here
     for (NodeId peer : config_.peers) {
-        // Peers that were caught up get the whole batch in one AppendEntries; the others pick
-        // it up from their reply chain.
-        if (next_index_[peer] == unflushed_from_) replicate_to(peer);
+        // Peers with nothing outstanding get the whole batch in one AppendEntries. A peer with
+        // an AppendEntries in flight gets it from that reply instead: sending it here too
+        // would duplicate it, and each duplicate reply could set off yet another send.
+        if (sent_index_[peer] <= match_index_[peer] && next_index_[peer] <= last_log_index()) replicate_to(peer);
     }
 }
 
@@ -319,6 +320,7 @@ void Raft::replicate_to(NodeId peer) {
     const Index end = std::min(last_log_index(), prev + config_.max_entries_per_append);
     ae.entries.assign(log_.begin() + static_cast<std::ptrdiff_t>(next - snapshot_index()),
                       log_.begin() + static_cast<std::ptrdiff_t>(end - snapshot_index()) + 1);
+    sent_index_[peer] = std::max(sent_index_[peer], end);
     send(peer, ae);
 }
 
@@ -411,6 +413,7 @@ void Raft::lose_leadership() {
     leader_.reset();
     next_index_.clear();
     match_index_.clear();
+    sent_index_.clear();
     last_ack_.clear();
     cancel_timer(heartbeat_timer_);
     reset_election_timer();
@@ -446,6 +449,7 @@ void Raft::become_leader() {
     cancel_timer(election_timer_);
     next_index_.clear();
     match_index_.clear();
+    sent_index_.clear();
     for (NodeId peer : config_.peers) {
         next_index_[peer] = last_log_index() + 1;
         match_index_[peer] = 0;
@@ -470,6 +474,7 @@ void Raft::step_down(Term term) {
     pre_voting_ = false;
     next_index_.clear();
     match_index_.clear();
+    sent_index_.clear();
     last_ack_.clear();
     persist_hard_state();
     if (was == Role::Leader) {

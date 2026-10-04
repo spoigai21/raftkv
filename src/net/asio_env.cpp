@@ -126,7 +126,9 @@ void AsioEnv::stop() {
         asio::error_code ignored;
         acceptor_->close(ignored);
     }
-    for (auto& [id, t] : timers_) t->cancel();
+    for (auto& [id, t] : timers_) {
+        if (t) t->cancel();
+    }
     timers_.clear();
     auto open = std::move(connections_);
     for (auto& [ptr, conn] : open) conn->close();
@@ -142,6 +144,21 @@ raft::Time AsioEnv::now() const {
 
 raft::TimerId AsioEnv::after(raft::Duration delay, raft::TimerTag tag) {
     const raft::TimerId id = ++next_timer_;
+    if (delay <= raft::Duration{0}) {
+        // "As soon as possible": Raft's group-commit flush and apply steps. A posted handler
+        // runs after whatever is already queued (so proposals that arrived together still
+        // share one flush), without a round trip through the timer queue. Cancelling it just
+        // removes its entry; the handler then finds nothing to do.
+        timers_.emplace(id, nullptr);
+        asio::post(io_, [this, id, tag] {
+            if (stopped_) return;
+            auto it = timers_.find(id);
+            if (it == timers_.end()) return;
+            timers_.erase(it);
+            node_->on_timer(id, tag);
+        });
+        return id;
+    }
     auto timer = std::make_unique<asio::steady_timer>(io_, delay);
     timer->async_wait([this, id, tag](asio::error_code ec) {
         if (ec || stopped_) return;
@@ -157,7 +174,7 @@ raft::TimerId AsioEnv::after(raft::Duration delay, raft::TimerTag tag) {
 void AsioEnv::cancel(raft::TimerId id) {
     auto it = timers_.find(id);
     if (it == timers_.end()) return;
-    it->second->cancel();
+    if (it->second) it->second->cancel();
     timers_.erase(it);
 }
 
