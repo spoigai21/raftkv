@@ -279,12 +279,14 @@ void FileStorage::append(std::span<const raft::LogEntry> entries) {
 }
 
 void FileStorage::truncate_suffix(raft::Index from) {
+    // By index, not position: after a snapshot the log starts at last_included_index + 1
+    // (postmortem 003).
     from = std::max<raft::Index>(from, 1);   // index 0 is the sentinel, never stored
-    if (from > state_.log.size()) return;    // nothing to delete
+    if (state_.log.empty() || from > state_.log.back().index) return;   // nothing to delete
     std::vector<std::byte> bytes;
     encode(TruncateFrom{from}, bytes);
     write_log(bytes);
-    state_.log.resize(static_cast<std::size_t>(from - 1));
+    std::erase_if(state_.log, [from](const raft::LogEntry& e) { return e.index >= from; });
 }
 
 void FileStorage::sync() { sync_file(log_fd_, (dir_ / kLogFile).string()); }

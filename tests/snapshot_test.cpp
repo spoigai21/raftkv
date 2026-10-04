@@ -125,6 +125,29 @@ TEST(FileStorageSnapshot, CrashBetweenSnapshotAndLogRewriteRecovers) {
     EXPECT_FALSE(fs::exists(crashed / "log.tmp"));
 }
 
+// Regression test (postmortem 003): deleting a conflicting suffix after the log has been
+// compacted. The log then starts after the snapshot, so a position in it is no longer an index.
+TEST(FileStorageSnapshot, TruncateAfterCompactionDeletesTheRightEntries) {
+    TempDir dir;
+    raft::PersistentState want;
+    {
+        auto s = *store::FileStorage::open(dir.path());
+        s->append(entries(1, 10, 1));
+        s->sync();
+        s->save_snapshot({.last_included_index = 5, .last_included_term = 1, .data = "state@5"});
+        s->truncate_suffix(8);           // entries 8..10 conflict with a new leader's
+        s->append(entries(8, 9, 2));
+        s->sync();
+        want = s->load();
+    }
+    std::vector<LogEntry> expected = entries(6, 7, 1);
+    for (auto& e : entries(8, 9, 2)) expected.push_back(e);
+    EXPECT_EQ(want.log, expected) << "the in-memory view is wrong";
+    auto reopened = store::FileStorage::open(dir.path());
+    ASSERT_TRUE(reopened.has_value()) << reopened.error();
+    EXPECT_EQ((*reopened)->load(), want);
+}
+
 TEST(FileStorageSnapshot, CorruptSnapshotRefusesToOpen) {
     TempDir dir;
     {
