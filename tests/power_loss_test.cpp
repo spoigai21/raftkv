@@ -220,12 +220,12 @@ std::optional<std::string> run(std::uint64_t seed, Bug bug, int rounds = 12) {
                     for (Index i = last + 1, n = rng.between(1, 4); i <= last + n; ++i) {
                         batch.push_back({t, i, payload(rng)});
                     }
-                    for (const LogEntry& e : batch) oracle.pending.push_back(e);
+                    for (const LogEntry& e : batch) oracle.pending.emplace_back(std::in_place_type<LogEntry>, e);
                     storage->append(batch);
                 } else if (choice < 65) {
                     // Raft only truncates uncommitted entries, never ones a snapshot covers.
                     const Index from = rng.between(snap_index + 1, last + 1);
-                    if (from <= last) oracle.pending.push_back(TruncateFrom{from});
+                    if (from <= last) oracle.pending.emplace_back(std::in_place_type<TruncateFrom>, from);
                     storage->truncate_suffix(from);
                 } else if (choice < 90) {
                     storage->sync();
