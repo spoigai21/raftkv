@@ -27,6 +27,10 @@ public:
 
     std::optional<std::string> get(const std::string& key) const;
 
+    // The reply to (client_id, seq) if that request is the client's last applied one, so a
+    // resend can be answered without going through the log again.
+    std::optional<Result> applied_reply(std::uint64_t client_id, std::uint64_t seq) const;
+
     // For Raft snapshots: the whole state, dedup table included (implementation guide
     // Phase 8), and back. Equal states encode to equal bytes.
     std::string serialize() const;

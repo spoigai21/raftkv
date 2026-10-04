@@ -24,6 +24,9 @@ public:
     raft::Raft& raft() { return raft_; }
     const raft::Raft& raft() const { return raft_; }
     const StateMachine& state() const { return state_; }
+    // Resent requests answered without a new log entry: they joined a pending proposal, or
+    // were answered from the dedup table because they had already applied.
+    std::uint64_t resends_joined() const { return resends_joined_; }
 
 private:
     struct Pending {
@@ -45,6 +48,7 @@ private:
     raft::Raft raft_;
     StateMachine state_;
     std::map<raft::Index, Pending> pending_;   // leader only: proposed, not yet applied
+    std::uint64_t resends_joined_ = 0;
 };
 
 }  // namespace raftkv::kv

@@ -4,6 +4,7 @@
 
 #include "raft_cluster.hpp"
 #include "test_seeds.hpp"
+#include "workload.hpp"
 
 namespace raftkv {
 namespace {
@@ -105,11 +106,13 @@ void append_survives_failover(raft::Index snapshot_every) {
         EXPECT_EQ(r->value, want) << "seed " << seed;
         EXPECT_GE(c.client(101).stats().timeouts, 10u) << "every reply was lost, so every op timed out";
 
-        std::uint64_t suppressed = 0;
+        // The retry is caught one of two ways: answered straight from the dedup table (the
+        // entry had applied before the leader died), or deduplicated when it applies again.
+        std::uint64_t caught = 0;
         for (NodeId id : c.ids()) {
-            if (auto* s = c.server(id)) suppressed += s->state().duplicates_suppressed();
+            if (auto* s = c.server(id)) caught += s->state().duplicates_suppressed() + s->resends_joined();
         }
-        EXPECT_GT(suppressed, 0u) << "the retry never reached the log, so dedup went untested";
+        EXPECT_GT(caught, 0u) << "no retry was ever recognised as a duplicate, so dedup went untested";
         EXPECT_SAFE(c);
     }
 }
@@ -120,6 +123,28 @@ TEST(Kv, AppendSurvivesLeaderFailoverWithoutDuplication) { append_survives_failo
 // node whose dedup table came out of a snapshot. Leaving the table out of snapshots fails
 // here.
 TEST(Kv, AppendSurvivesLeaderFailoverWithSnapshots) { append_survives_failover(2); }
+
+// A client whose timeout is far too short resends almost every request before it commits.
+// Those resends must join the pending proposal, not add entries to the log: the log should
+// hold about one entry per operation, not one per send.
+TEST(Kv, ResentPendingRequestsAreNotProposedTwice) {
+    RaftCluster c(1, 3, ClusterOptions{.kv = true, .clients = 3, .client_timeout = 2ms});
+    c.quiet();
+    c.sim().start();
+    ASSERT_TRUE(c.wait_for_leader(2s));
+    test::Workload w = test::run_workload(c, 1, raft::Time{6s});
+    c.sim().run_until(raft::Time{6s});
+    ASSERT_TRUE(test::wait_for_clients_idle(c, raft::Time{20s})) << c.context();
+    const NodeId leader = *c.leader();
+    std::uint64_t timeouts = 0;
+    for (NodeId id : c.client_ids()) timeouts += c.client(id).stats().timeouts;
+    const auto ops = w.history->size();
+    const auto entries = c.raft(leader)->last_log_index();
+    EXPECT_GT(timeouts, ops) << "the test needs the client to resend a lot";
+    EXPECT_GT(c.server(leader)->resends_joined(), 0u);
+    EXPECT_LT(entries, ops + ops / 10 + 10) << entries << " log entries for " << ops << " operations";
+    EXPECT_SAFE(c);
+}
 
 // A leader that is deposed while a request is pending answers NotLeader at once, instead of
 // leaving the client to time out. (A fixed 2 s client timeout, so that only the NotLeader

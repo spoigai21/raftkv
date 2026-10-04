@@ -60,6 +60,12 @@ tl::expected<StateMachine, std::string> StateMachine::deserialize(const std::str
     return sm;
 }
 
+std::optional<Result> StateMachine::applied_reply(std::uint64_t client_id, std::uint64_t seq) const {
+    auto it = sessions_.find(client_id);
+    if (it == sessions_.end() || it->second.last_seq != seq) return std::nullopt;
+    return it->second.last_result;
+}
+
 std::optional<std::string> StateMachine::get(const std::string& key) const {
     auto it = data_.find(key);
     if (it == data_.end()) return std::nullopt;

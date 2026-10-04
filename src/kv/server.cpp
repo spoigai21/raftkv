@@ -49,6 +49,24 @@ void Server::handle_request(raft::NodeId from, const Command& c) {
                      .result = {}, .leader_hint = raft_.leader()});
         return;
     }
+    // A resend of a request that already applied (its reply was lost, or is still on its
+    // way): answer from the dedup table. The operation took effect when it applied, and this
+    // is the reply it produced, so the answer is the same one the log would give.
+    if (auto done = state_.applied_reply(c.client_id, c.seq)) {
+        ++resends_joined_;
+        reply(from, {.client_id = c.client_id, .seq = c.seq, .status = Status::Ok, .result = *done,
+                     .leader_hint = std::nullopt});
+        return;
+    }
+    // A resend of a request that is already proposed and pending (the client timed out
+    // early): answer it when the original applies, rather than putting it in the log again.
+    for (auto& [index, p] : pending_) {
+        if (p.client_id == c.client_id && p.seq == c.seq) {
+            p.from = from;
+            ++resends_joined_;
+            return;
+        }
+    }
     const raft::ProposeResult r = raft_.propose(encode_command(c));
     pending_[r.index] = {.from = from, .client_id = c.client_id, .seq = c.seq, .term = r.term};
 }
