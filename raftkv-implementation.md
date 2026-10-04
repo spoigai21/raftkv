@@ -930,6 +930,33 @@ a gRPC front end → multi-Raft sharding.
 
 ---
 
+## After the plan: the three improvements
+
+Phase 9's measurements pointed at three changes, made once Phase 10 was done. Each landed
+with tests, planted-bug checks and re-measurement:
+
+1. **Adaptive client timeout** (`src/kv/client.cpp`).
+   - The timeout follows RFC 6298: smoothed RTT + 4 × its variation, clamped to 100 ms–1 s.
+     Karn's rule applies: a retried request gives no sample.
+   - On a timeout, the client resends once to the same server, then moves on.
+   - Real-process failover went from ~495 ms to ~300 ms; simulated 20% loss went from 5%
+     to ~19% of normal throughput.
+   - The first version carried a doubled timeout across servers and made failover *slower*
+     (836–1,031 ms). Measuring real processes caught it.
+2. **Group commit** (`Raft::flush_proposals`). Proposals are appended unsynced, and one
+   zero-delay flush event syncs them all before the leader counts itself. This also fixed
+   a liveness problem found along the way: under load, fsync-per-request blocked the leader
+   long enough to miss heartbeats, so the cluster held elections with no faults at all.
+3. **PreVote and CheckQuorum** (thesis §9.6). Nodes that still hear a leader refuse
+   pre-votes, so a returning or slow node can no longer force elections. The slow-link row
+   of the fault matrix went from 98 forced elections to 0. A leader that cannot hear a
+   majority steps down. A dedicated test (`PreVoteProtectsAHealthyLeader`) covers the
+   leader-alive check, which no existing test exercised: in the slow-link test, the slow
+   node's log also lags, so that check never decided anything.
+
+Phase 9's numbers are frozen in `docs/results-phase9.csv`, and the predictions stay scored
+against them. `docs/results.md` shows before and after.
+
 ## Common Raft bugs — check these first
 
 1. Committing a **previous-term** entry by majority count alone (§5.4.2).

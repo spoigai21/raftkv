@@ -146,6 +146,11 @@ Prediction 5 is the interesting one: if it is wrong, that is a result worth repo
 3. ✗ Batching gave **3.4×**, not 2×. With one entry per RPC, followers also sync once per
    entry, and replication takes a round trip per entry.
 
+These scores stand against the version the predictions were made about. Phase 9's
+measurements are frozen in `docs/results-phase9.csv`. Three later improvements (group
+commit, an adaptive client timeout, PreVote/CheckQuorum) changed the numbers since; the
+before and after are in `docs/results.md`.
+
 ## 8. Risks, and what to do about them
 
 | Risk | Mitigation |

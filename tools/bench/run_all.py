@@ -127,6 +127,9 @@ def machine_rows(res):
     res.add("machine", "memory", "size", f"{mem_gb:.0f}", "GiB")
     res.add("machine", "os", "name", os_name, "", disk_note)
     res.add("machine", "date", "measured", time.strftime("%Y-%m-%d"), "")
+    if platform.system() == "Darwin":   # macOS may run slower on battery
+        batt = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True).stdout
+        res.add("machine", "power", "source", "battery" if "Battery Power" in batt else "AC", "")
 
 
 def throughput(res, build, secs, reps, experiment, variant, n=3, extra=(), clients=32, write_pct=100,
@@ -193,6 +196,10 @@ def main():
     print("5. batching: 1 entry per AppendEntries vs up to 64", flush=True)
     throughput(res, args.build, secs, reps, "batching", "max 1 entry per RPC", extra=["--max-batch", "1"])
     throughput(res, args.build, secs, reps, "batching", "max 64 entries per RPC", extra=["--max-batch", "64"])
+
+    print("5b. group commit: one fsync per proposal vs one per batch", flush=True)
+    throughput(res, args.build, secs, reps, "group_commit", "off (one fsync per request)", extra=["--no-group-commit"])
+    throughput(res, args.build, secs, reps, "group_commit", "on (one fsync per batch)")
 
     print("6. what fsync costs", flush=True)
     throughput(res, args.build, secs, reps, "fsync", "durable (fsync)")
