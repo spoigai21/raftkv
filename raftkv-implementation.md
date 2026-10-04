@@ -594,8 +594,10 @@ garbage.
 - **Limit, stated plainly: `kill -9` cannot test `fsync`.** After `kill -9` the data is still
   in the page cache, so those tests pass with or without `fsync`. What shows that entries
   are synced before they are acknowledged is `SimStorage`, which does drop unsynced writes
-  on a crash. Proving the disk's durability would need power-loss testing, e.g. LazyFS or
-  `dm-log-writes`, which is out of scope. The simulator's file-backed tests use
+  on a crash. *(Added after Phase 10:)* `FileStorage` now does its file operations through
+  a small `Io` interface, and `tests/power_loss_test.cpp` runs it on a model disk that cuts
+  the power at any file operation. That checks the fsync ordering (it found postmortem 004);
+  a drive that lies about flushing would still need real power-loss hardware testing. The simulator's file-backed tests use
   `Sync::ProcessCrashOnly` (no fsync), since they only crash processes. With fsync they
   spend 95% of their time in `F_FULLFSYNC`.
 - Recovering a node whose log is corrupt needs an operator. Simply wiping its data
@@ -916,7 +918,7 @@ a gRPC front end → multi-Raft sharding.
 *As built:*
 
 - **README** in the order above, in present tense, with a Mermaid architecture diagram. Its
-  "What went wrong" section links both postmortems, the wrong predictions, the fault-matrix
+  "What went wrong" section links every postmortem, the wrong predictions, the fault-matrix
   rows that did not meet expectations, and the test bugs. Its "Limits and next steps" names
   group commit, client timeouts, PreVote/CheckQuorum, single-message snapshots, untested
   power loss and one open question.

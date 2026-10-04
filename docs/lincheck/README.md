@@ -57,5 +57,6 @@ crashes, partitions, pauses and message loss:
   | reply to writes before they commit | 77 |
 
 Prediction 5 in `raftkv.md` was that the checker would find a real bug the unit tests missed.
-**So far it has not.** The one real bug found in this project (postmortem 001) came from the
-invariant checker, and it was a bug in the checker itself.
+**So far it has not.** The real bugs found in this project came from other tests: the
+invariant checker (postmortem 001, a bug in the checker itself), the repeated real-process
+test (002), reading the code (003) and the power-loss model (004).

@@ -23,12 +23,24 @@ CLUSTER=$WORK/cluster.json
 printf '{"1":"127.0.0.1:%d","2":"127.0.0.1:%d","3":"127.0.0.1:%d"}\n' $BASE $((BASE+1)) $((BASE+2)) > "$CLUSTER"
 declare -a PID=(0 0 0 0)
 
+# On failure the data directories and logs are kept, for a failure that does not come back:
+# under $RAFTKV_SMOKE_EVIDENCE if set (CI uploads it), else where they are.
+KEEP=0
 cleanup() {
     for i in 1 2 3; do [[ ${PID[$i]} -ne 0 ]] && kill -9 "${PID[$i]}" 2>/dev/null || true; done
     wait 2>/dev/null || true
-    rm -rf "$WORK"
+    if [[ $KEEP -eq 0 ]]; then
+        rm -rf "$WORK"
+    elif [[ -n ${RAFTKV_SMOKE_EVIDENCE:-} ]]; then
+        mkdir -p "$RAFTKV_SMOKE_EVIDENCE"
+        cp -R "$WORK" "$RAFTKV_SMOKE_EVIDENCE/" && rm -rf "$WORK"
+        echo "evidence kept in $RAFTKV_SMOKE_EVIDENCE/$(basename "$WORK")" >&2
+    else
+        echo "evidence kept in $WORK" >&2
+    fi
 }
 fail() {
+    KEEP=1
     echo "FAIL: $*" >&2
     for i in 1 2 3; do echo "--- node $i log (tail) ---" >&2; tail -n 30 "$WORK/node$i.log" >&2 || true; done
     # In GitHub Actions, also raise an annotation: unlike job logs, annotations can be read
@@ -124,20 +136,30 @@ kill9 3
 # Corrupt the middle of synced data. Right after a snapshot the log can be empty (and a byte
 # written into an empty log is only a torn tail, which recovery rightly cuts off), so use the
 # snapshot file then. A damaged snapshot must make the node refuse to start just the same.
+# Nothing else may be using node 3's files: a stray process could rewrite them under us.
+STRAY=$(pgrep -f -- "--data-dir $WORK/data3" || true)
+[[ -z $STRAY ]] || fail "node 3 was killed, but process(es) $STRAY still use its data directory"
 LOG=$WORK/data3/log
 [[ $(wc -c <"$LOG" | tr -d ' ') -gt 0 ]] || LOG=$WORK/data3/snapshot
 [[ -s $LOG ]] || fail "node 3 has neither a log nor a snapshot to corrupt"
 SIZE=$(wc -c <"$LOG" | tr -d ' ')
 AT=$((SIZE / 2))
+# The bytes around the target and the file's identity, before and after, for the record:
+# if the corruption ever goes missing again, these show whether the file was replaced.
+around() { echo "$1: inode $(ls -i "$LOG" | awk '{print $1}'), $(wc -c <"$LOG" | tr -d ' ') bytes"; \
+           od -Ax -tx1 -j $(( AT > 16 ? AT - 16 : 0 )) -N 33 "$LOG"; } >>"$WORK/corruption.txt"
+around "before"
 BEFORE=$(od -An -tx1 -j "$AT" -N1 "$LOG" | tr -d ' ')
 NEW=$([[ $BEFORE == a5 ]] && echo 5a || echo a5)
 printf "\\x$NEW" | dd of="$LOG" bs=1 seek="$AT" conv=notrunc 2>/dev/null
 AFTER=$(od -An -tx1 -j "$AT" -N1 "$LOG" | tr -d ' ')
 # Make sure the corruption really happened, so a pass means "refused", not "nothing to refuse".
+around "corrupted byte $AT ($BEFORE -> $NEW)"
 [[ $AFTER == "$NEW" ]] || fail "could not corrupt byte $AT of a $SIZE-byte log (was $BEFORE, now $AFTER)"
 "$RAFTKVD" --id 3 --cluster "$CLUSTER" --data-dir "$WORK/data3" --snapshot-every 20 >>"$WORK/node3.log" 2>&1 &
 P3=$!
-if ! wait_exit $P3 10; then kill -9 $P3; fail "node 3 is running on a corrupt $(basename "$LOG") ($SIZE bytes)"; fi
+if ! wait_exit $P3 10; then kill -9 $P3; around "after starting node 3"; fail "node 3 is running on a corrupt $(basename "$LOG") ($SIZE bytes)"; fi
+around "after node 3 exited ($RC)"
 [[ $RC -eq 1 ]] || fail "node 3 started on a corrupt $(basename "$LOG") (exit $RC)"
 grep -q "refusing to start" "$WORK/node3.log" || fail "no refusal message"
 [[ $(ctl put after-corruption yes) == OK ]] || fail "the other two stopped serving"

@@ -130,9 +130,10 @@ Setup: 3 or 5 `raftkvd` processes on this laptop, 32 closed-loop clients, durabl
    throughput. Phase 7's fault matrix measured it before this list was filled in: in the
    simulator, 20% drops kept **5.2%** of normal throughput, i.e. cost about 95%.
 5. *(Not a prediction; unresolved so far.)* The linearizability checker finds at least one
-   real bug that the unit tests missed. **So far it has not.** Of the two real bugs found:
+   real bug that the unit tests missed. **So far it has not.** Of the real bugs found:
    the invariant checker found postmortem 001, a bug in the checker itself; the repeated
-   real-process test found postmortem 002, in the transport. The checker has caught every
+   real-process test found postmortem 002, in the transport. Two storage bugs came later:
+   003 by reading the code, 004 by the power-loss model. The checker has caught every
    planted bug.
 
 Prediction 5 is the interesting one: if it is wrong, that is a result worth reporting too.

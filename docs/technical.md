@@ -61,6 +61,13 @@ flowchart LR
   dedup missing from snapshots) are all caught; see [`lincheck/`](lincheck/).
 - **Real processes.** `tests/cluster/smoke.sh` and `tools/demo.sh --check` run `raftkvd`
   for real and `kill -9` it. CI repeats the smoke test 10× per job.
+- **Power loss.** `tests/power_loss_test.cpp` runs `FileStorage` on a model disk
+  (`tests/power_loss_io.hpp`) that loses power at a random file operation, including
+  mid-snapshot and mid-recovery. Unsynced appends keep any prefix of their bytes; a new or
+  renamed name survives only after the directory is synced. Recovery must keep everything
+  the `Storage` contract made durable and invent nothing: 400 seeds × 12 power cuts.
+  Planted bugs (no directory fsync, renaming an unsynced file, no log fsync) are each caught.
+  This tests the *order* of writes and fsyncs, not whether a real drive honors a flush.
 - **Memory and thread safety.** ASan/UBSan and TSan run in CI, with a hardened standard
   library. The on-disk log decoder is fuzzed with libFuzzer: over a million inputs a minute,
   and CI fuzzes every push.
@@ -83,7 +90,7 @@ marked in the last column also run against real `raftkvd` processes.
 | Follower crash + restart | `kill -9` a follower, restart 1 s later | catches up | recovers from its own log, then catches up | `FollowerCrashAndRestart` | ✓ all nodes `kill -9` |
 | Slow follower: slow replies | +500 ms on its replies to the leader | available; p50 unchanged | available; p50 **+11%**, throughput −10% (median of 20 seeds). Commits wait for the one fast follower instead of the faster of two | `SlowFollowerReplies` | |
 | Slow follower: slow link both ways | +500 ms each way | available; p50 unchanged | available; p50 +10%, throughput −10%; **no extra elections** (PreVote). Before PreVote: 98 forced elections and up to −22% | `SlowFollowerLinkBothWays` | |
-| Message drops | 20% of all messages, 5 s | progress continues via retries | every client progresses, at **18.5%** of normal throughput (5.2% before the adaptive client timeout) | `TwentyPercentMessageDrops` | |
+| Message drops | 20% of all messages, 5 s | progress continues via retries | every client progresses, at **18.7%** of normal throughput (5.2% before the adaptive client timeout) | `TwentyPercentMessageDrops` | |
 | Paused leader | `SIGSTOP` the leader for 1 s | followers elect; old leader steps down on resume | as expected | `PausedLeader` | |
 | Torn log tail | half a record at the end of a follower's log | cuts it off, rejoins, catches up | as expected | `TornLogTail` | |
 | Corrupt log tail | flip a byte in a complete, synced record | refuses to start; no stale reads | refuses to start; the other two keep serving | `CorruptLogTail` | ✓ (log or snapshot) |
@@ -102,6 +109,14 @@ Everything here was found by the tests above, and each is written up.
   ([postmortem 002](postmortems/002-pop-from-emptied-write-queue.md)). It only shows up
   with real sockets, which the simulator never uses. The repeated real-process test caught
   it (5 of 20 Release runs crashed). A hardened standard library now traps it at the exact line.
+- **A power cut mid-snapshot could stop a node from ever restarting**
+  ([postmortem 004](postmortems/004-interrupted-compaction.md)). Recovery fixed the
+  in-memory log but left the old log file under the new snapshot, so later appends made a
+  gap. Found by the power-loss model on its first run.
+- **Deleting log entries after a snapshot deleted nothing**
+  ([postmortem 003](postmortems/003-truncate-after-compaction.md)). Storage did index
+  arithmetic on positions, which snapshots made wrong. Found by reading the code while
+  refactoring for the power-loss model.
 - **The invariant checker was stricter than the paper**
   ([postmortem 001](postmortems/001-leader-completeness-check-too-strict.md)). A node
   paused mid-election legitimately led an old term. The fix was to state Leader
@@ -113,6 +128,10 @@ Everything here was found by the tests above, and each is written up.
   its one thread for a 4 ms fsync per request, long enough with 32 clients to miss
   heartbeats. A faster client timeout made it worse, by resending, which meant more
   proposals and more fsyncs. Group commit fixed the cause: one fsync per batch.
+- **Group commit then slowed the unsafe no-fsync mode** about 4×. Profiling showed the
+  leader was not slow but busy: each flush re-sent every in-flight entry, so followers got
+  the same entries several times. The leader now tracks what it has sent but not yet had
+  acknowledged, and only sends to followers with nothing in flight.
 - **The first adaptive client timeout made failover slower** (836–1,031 ms). It carried a
   doubled timeout from server to server. Caught by measuring real processes, not only the
   simulator, and fixed.
@@ -128,23 +147,25 @@ Everything here was found by the tests above, and each is written up.
 ## Limits and next steps
 
 - **fsync still sets the pace.** Group commit shares one 4 ms `F_FULLFSYNC` across a batch,
-  but every batch pays one. Without fsync the cluster is about 10× faster; see
+  but every batch pays one. Without fsync the cluster is over 100× faster (785 vs 114,500 ops/s); see
   [`results.md`](results.md).
-- **Group commit costs the unsafe no-fsync mode.** The flush runs as its own zero-delay timer
-  event, which adds about 1.3 ms per batch. With a 4 ms fsync that is a bargain (4.7× more
-  durable writes), but with no fsync it is pure overhead: 70k → 16k ops/s in a quick
-  comparison. Flushing immediately when nothing else is queued, or posting the flush
-  instead of using a timer, would likely recover it. Only the measurement-only
-  `--unsafe-no-fsync` mode is affected.
-- **Measured on battery.** The final measurements ran on battery power, which macOS may
-  slow down; Phase 9's power source was not recorded. `docs/results.csv` now records it.
-- **Spurious client resends:** under load about 1–2% of requests are resent, because the
-  100 ms timeout floor sits near p99. Dedup makes them harmless, but they are wasted work.
+- **One laptop, noisy numbers.** Run-to-run variation is around 10%: the build-type rows
+  (one run each) even show the sanitizer builds ahead of release, which they are not. Small
+  differences in `results.md` mean nothing; the large ratios (group commit, batching, fsync)
+  are stable.
+- **Client resends still happen** under load (about 1–2% of requests), because the 100 ms
+  timeout floor sits near p99. They are now nearly free: the leader answers a resend from
+  its dedup table, or attaches it to the proposal already in flight, instead of adding a
+  log entry and an fsync.
 - **Snapshots travel in one message**, so the state must fit a 16 MiB frame.
-- **Not tested: power loss.** `kill -9` cannot show that fsync is durable. `SimStorage`
-  models lost unsynced writes; the disk itself would need LazyFS or `dm-log-writes`.
+- **Power loss is modeled, not physical.** The model disk checks that every fsync is in the
+  right place. A drive that acknowledges a flush it has not done would still lose data;
+  testing that needs real power cuts or a tool like `dm-log-writes`.
 - **Out of scope for v1:** membership changes, `ReadIndex`/lease reads, a gRPC front end,
   multi-Raft sharding, client-session eviction.
 - **Open question:** once, before snapshots existed, the smoke test's corruption step found
-  its byte missing from the file afterwards. It has not recurred in the 300-odd runs since;
-  the test now verifies the corruption and fails fast with logs if it happens again.
+  its byte missing from the file afterwards. It has not recurred since. If it does, the test
+  now keeps the data directories, a hexdump of the bytes and the file's inode before and
+  after (a changed inode means the file was replaced, not edited), and CI uploads them. It
+  also fails if any process still uses node 3's directory after the kill, since a stray
+  `raftkvd` compacting the log would replace the corrupted file with a clean one.

@@ -58,6 +58,7 @@ add_library(raftkv
     src/sim/sim_storage.cpp
     src/store/file_storage.cpp
     src/store/log_codec.cpp
+    src/store/posix_io.cpp
 )
 target_include_directories(raftkv PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(raftkv
@@ -95,6 +96,7 @@ if(RAFTKV_BUILD_TESTS)
         tests/linearizability_test.cpp
         tests/fault_matrix_test.cpp
         tests/snapshot_test.cpp
+        tests/power_loss_test.cpp
     )
     target_link_libraries(raftkv_tests PRIVATE raftkv raftkv_warnings GTest::gtest_main
                                                nlohmann_json::nlohmann_json)

@@ -1,13 +1,8 @@
 #include "store/file_storage.hpp"
 
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
 #include <algorithm>
-#include <cerrno>
-#include <cstring>
 #include <format>
+#include <variant>
 #include <vector>
 
 #include "store/log_codec.hpp"
@@ -27,58 +22,6 @@ constexpr const char* kLogTmp = "log.tmp";
 constexpr std::uint32_t kSnapshotMagic = 0x4e53'4b52;   // "RKSN"
 constexpr std::uint32_t kHardStateMagic = 0x5348'4b52;   // "RKHS"
 constexpr std::size_t kHardStateSize = 4 + 8 + 1 + 4 + 4;
-
-[[noreturn]] void fail(const std::string& what) {
-    throw StorageFailure(std::format("{}: {}", what, std::strerror(errno)));
-}
-
-// Makes everything written to `fd` durable. On macOS, fsync() only reaches the drive's
-// cache; F_FULLFSYNC asks the drive to flush it (implementation guide Phase 4).
-void full_sync(int fd, const std::string& what) {
-#ifdef __APPLE__
-    if (::fcntl(fd, F_FULLFSYNC) == 0) return;
-    // Some filesystems (network, some virtual disks) reject F_FULLFSYNC; fall back.
-#endif
-    if (::fsync(fd) != 0) fail("fsync " + what);
-}
-
-void sync_dir(const fs::path& dir) {
-    const int fd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (fd < 0) fail("open dir " + dir.string());
-    full_sync(fd, dir.string());
-    ::close(fd);
-}
-
-void write_all(int fd, std::span<const std::byte> bytes, const std::string& what) {
-    while (!bytes.empty()) {
-        const ssize_t n = ::write(fd, bytes.data(), bytes.size());
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            fail("write " + what);
-        }
-        bytes = bytes.subspan(static_cast<std::size_t>(n));
-    }
-}
-
-tl::expected<std::vector<std::byte>, std::string> read_file(const fs::path& p) {
-    const int fd = ::open(p.c_str(), O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return tl::unexpected(std::format("open {}: {}", p.string(), std::strerror(errno)));
-    std::vector<std::byte> out;
-    std::byte buf[1 << 16];
-    while (true) {
-        const ssize_t n = ::read(fd, buf, sizeof buf);
-        if (n < 0 && errno == EINTR) continue;
-        if (n < 0) {
-            const std::string err = std::format("read {}: {}", p.string(), std::strerror(errno));
-            ::close(fd);
-            return tl::unexpected(err);
-        }
-        if (n == 0) break;
-        out.insert(out.end(), buf, buf + n);
-    }
-    ::close(fd);
-    return out;
-}
 
 void put(std::vector<std::byte>& out, std::uint64_t v, int bytes) {
     for (int i = 0; i < bytes; ++i) out.push_back(static_cast<std::byte>(v >> (8 * i)));
@@ -180,92 +123,92 @@ tl::expected<raft::Snapshot, std::string> decode_snapshot(std::span<const std::b
 }
 
 // Writes `bytes` to dir/tmp_name, makes it durable, and renames it over dir/name.
-void replace_file(const fs::path& dir, const char* name, const char* tmp_name, std::span<const std::byte> bytes,
-                  bool durable) {
+void replace_file(Io& io, const fs::path& dir, const char* name, const char* tmp_name,
+                  std::span<const std::byte> bytes, bool durable) {
     const fs::path tmp = dir / tmp_name;
-    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-    if (fd < 0) fail("open " + tmp.string());
-    try {
-        write_all(fd, bytes, tmp.string());
-        if (durable) full_sync(fd, tmp.string());
-    } catch (...) {
-        ::close(fd);
-        throw;
-    }
-    ::close(fd);
-    if (::rename(tmp.c_str(), (dir / name).c_str()) != 0) fail("rename " + tmp.string());
-    if (durable) sync_dir(dir);   // makes the rename itself durable
+    io.write_new(tmp, bytes);
+    if (durable) io.sync(tmp);   // the contents, before the name points at them
+    io.rename(tmp, dir / name);
+    if (durable) io.sync_dir(dir);   // makes the rename itself durable
 }
 
 }  // namespace
 
-tl::expected<std::unique_ptr<FileStorage>, std::string> FileStorage::open(const fs::path& dir, Sync sync) {
-    std::error_code ec;
-    fs::create_directories(dir, ec);
-    if (ec) return tl::unexpected(std::format("create {}: {}", dir.string(), ec.message()));
-    // Leftovers from a crash mid-save, never renamed into place.
-    for (const char* tmp : {kHardStateTmp, kSnapshotTmp, kLogTmp}) fs::remove(dir / tmp, ec);
+tl::expected<std::unique_ptr<FileStorage>, std::string> FileStorage::open(const fs::path& dir, Sync sync,
+                                                                          std::shared_ptr<Io> io) {
+    if (!io) io = posix_io();
+    try {
+        io->create_dirs(dir);
+        // Leftovers from a crash mid-save, never renamed into place.
+        for (const char* tmp : {kHardStateTmp, kSnapshotTmp, kLogTmp}) io->remove(dir / tmp);
 
-    raft::PersistentState state;
-    if (fs::exists(dir / kHardStateFile)) {
-        auto bytes = read_file(dir / kHardStateFile);
-        if (!bytes) return tl::unexpected(bytes.error());
-        if (auto ok = decode_hard_state(*bytes, state); !ok) return tl::unexpected(ok.error());
-    }
-
-    if (fs::exists(dir / kSnapshotFile)) {
-        auto bytes = read_file(dir / kSnapshotFile);
-        if (!bytes) return tl::unexpected(bytes.error());
-        auto snap = decode_snapshot(*bytes);
-        if (!snap) return tl::unexpected(snap.error());
-        state.snapshot = std::move(*snap);
-    }
-
-    const fs::path log_path = dir / kLogFile;
-    const int fd = ::open(log_path.c_str(), O_RDWR | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
-    if (fd < 0) return tl::unexpected(std::format("open {}: {}", log_path.string(), std::strerror(errno)));
-    auto close_on_error = [fd](std::string err) {
-        ::close(fd);
-        return tl::unexpected(std::move(err));
-    };
-
-    auto bytes = read_file(log_path);
-    if (!bytes) return close_on_error(bytes.error());
-    auto scanned = scan(*bytes);
-    if (!scanned) {
-        return close_on_error(std::format("{}: corrupt at or after a valid prefix: {}",
-                                          log_path.string(), to_string(scanned.error())));
-    }
-    if (auto ok = replay(scanned->records, state); !ok) return close_on_error(ok.error());
-
-    if (scanned->torn_tail) {
-        // Cut the torn tail off durably, so new records follow the last valid one.
-        if (::ftruncate(fd, static_cast<off_t>(scanned->valid_bytes)) != 0) {
-            return close_on_error(std::format("truncate {}: {}", log_path.string(), std::strerror(errno)));
+        raft::PersistentState state;
+        if (io->exists(dir / kHardStateFile)) {
+            auto bytes = io->read(dir / kHardStateFile);
+            if (!bytes) return tl::unexpected(bytes.error());
+            if (auto ok = decode_hard_state(*bytes, state); !ok) return tl::unexpected(ok.error());
         }
-        try {
-            if (sync == Sync::Durable) full_sync(fd, log_path.string());
-        } catch (const StorageFailure& e) {
-            return close_on_error(e.what());
+
+        if (io->exists(dir / kSnapshotFile)) {
+            auto bytes = io->read(dir / kSnapshotFile);
+            if (!bytes) return tl::unexpected(bytes.error());
+            auto snap = decode_snapshot(*bytes);
+            if (!snap) return tl::unexpected(snap.error());
+            state.snapshot = std::move(*snap);
         }
+
+        const fs::path log_path = dir / kLogFile;
+        std::vector<std::byte> bytes;
+        if (io->exists(log_path)) {
+            auto read = io->read(log_path);
+            if (!read) return tl::unexpected(read.error());
+            bytes = std::move(*read);
+        } else {
+            // Created up front, name and all: syncing a file later does not make its name durable.
+            replace_file(*io, dir, kLogFile, kLogTmp, {}, sync == Sync::Durable);
+        }
+        auto scanned = scan(bytes);
+        if (!scanned) {
+            return tl::unexpected(std::format("{}: corrupt at or after a valid prefix: {}", log_path.string(),
+                                              to_string(scanned.error())));
+        }
+        if (auto ok = replay(scanned->records, state); !ok) return tl::unexpected(ok.error());
+
+        // A crash between save_snapshot's two steps leaves the old log under the new snapshot.
+        // Finish the compaction now: entries appended later must follow the snapshot, not the
+        // old log's last entry, or the next recovery finds a gap (postmortem 004).
+        const raft::Index covered = state.snapshot ? state.snapshot->last_included_index : 0;
+        const bool stale = std::ranges::any_of(scanned->records, [covered](const LogRecord& r) {
+            const auto* e = std::get_if<raft::LogEntry>(&r);
+            return e != nullptr && e->index <= covered;
+        });
+        if (stale) {
+            std::vector<std::byte> rewritten;
+            for (const raft::LogEntry& e : state.log) encode(e, rewritten);
+            replace_file(*io, dir, kLogFile, kLogTmp, rewritten, sync == Sync::Durable);
+        } else if (scanned->torn_tail) {
+            // Cut the torn tail off durably, so new records follow the last valid one.
+            io->truncate(log_path, scanned->valid_bytes);
+            if (sync == Sync::Durable) io->sync(log_path);
+        }
+        return std::unique_ptr<FileStorage>(
+            new FileStorage(dir, std::move(io), std::move(state), scanned->torn_tail, sync));
+    } catch (const StorageFailure& e) {
+        return tl::unexpected(std::string(e.what()));
     }
-    return std::unique_ptr<FileStorage>(
-        new FileStorage(dir, fd, std::move(state), scanned->torn_tail, sync));
 }
 
-FileStorage::FileStorage(fs::path dir, int log_fd, raft::PersistentState state, bool torn, Sync sync)
+FileStorage::FileStorage(fs::path dir, std::shared_ptr<Io> io, raft::PersistentState state, bool torn, Sync sync)
     : dir_(std::move(dir)),
       sync_mode_(sync),
-      log_fd_(log_fd),
+      io_(std::move(io)),
       state_(std::move(state)),
       recovered_torn_tail_(torn) {}
 
-FileStorage::~FileStorage() {
-    if (log_fd_ >= 0) ::close(log_fd_);
-}
+FileStorage::~FileStorage() = default;
 
 void FileStorage::save_hard_state(raft::Term current_term, std::optional<raft::NodeId> voted_for) {
-    replace_file(dir_, kHardStateFile, kHardStateTmp, encode_hard_state(current_term, voted_for),
+    replace_file(*io_, dir_, kHardStateFile, kHardStateTmp, encode_hard_state(current_term, voted_for),
                  sync_mode_ == Sync::Durable);
     state_.current_term = current_term;
     state_.voted_for = voted_for;
@@ -289,13 +232,15 @@ void FileStorage::truncate_suffix(raft::Index from) {
     std::erase_if(state_.log, [from](const raft::LogEntry& e) { return e.index >= from; });
 }
 
-void FileStorage::sync() { sync_file(log_fd_, (dir_ / kLogFile).string()); }
+void FileStorage::sync() {
+    if (sync_mode_ == Sync::Durable) io_->sync(dir_ / kLogFile);
+}
 
 void FileStorage::save_snapshot(const raft::Snapshot& snapshot) {
     const bool durable = sync_mode_ == Sync::Durable;
     // 1. The snapshot, durably. From here a crash recovers the snapshot plus the old log,
     //    whose covered entries replay() drops.
-    replace_file(dir_, kSnapshotFile, kSnapshotTmp, encode_snapshot(snapshot), durable);
+    replace_file(*io_, dir_, kSnapshotFile, kSnapshotTmp, encode_snapshot(snapshot), durable);
     state_.snapshot = snapshot;
     std::erase_if(state_.log, [&](const raft::LogEntry& e) { return e.index <= snapshot.last_included_index; });
 
@@ -303,20 +248,9 @@ void FileStorage::save_snapshot(const raft::Snapshot& snapshot) {
     //    what keeps the log bounded.
     std::vector<std::byte> bytes;
     for (const raft::LogEntry& e : state_.log) encode(e, bytes);
-    replace_file(dir_, kLogFile, kLogTmp, bytes, durable);
-    const fs::path log_path = dir_ / kLogFile;
-    const int fd = ::open(log_path.c_str(), O_RDWR | O_APPEND | O_CLOEXEC);
-    if (fd < 0) fail("reopen " + log_path.string());
-    ::close(log_fd_);
-    log_fd_ = fd;
+    replace_file(*io_, dir_, kLogFile, kLogTmp, bytes, durable);
 }
 
-void FileStorage::sync_file(int fd, const std::string& what) const {
-    if (sync_mode_ == Sync::Durable) full_sync(fd, what);
-}
-
-void FileStorage::write_log(std::span<const std::byte> bytes) {
-    write_all(log_fd_, bytes, (dir_ / kLogFile).string());
-}
+void FileStorage::write_log(std::span<const std::byte> bytes) { io_->append(dir_ / kLogFile, bytes); }
 
 }  // namespace raftkv::store

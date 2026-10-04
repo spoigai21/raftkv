@@ -8,6 +8,7 @@
 #include <tl/expected.hpp>
 
 #include "raft/storage.hpp"
+#include "store/io.hpp"
 
 namespace raftkv::store {
 
@@ -40,8 +41,9 @@ public:
 
     // Opens (creating if needed) the data directory and recovers its state. A torn log tail is
     // cut off; any other damage is an error and the node must not start.
+    // `io` defaults to the real filesystem; tests pass a model of a disk that loses power.
     static tl::expected<std::unique_ptr<FileStorage>, std::string> open(
-        const std::filesystem::path& dir, Sync sync = Sync::Durable);
+        const std::filesystem::path& dir, Sync sync = Sync::Durable, std::shared_ptr<Io> io = nullptr);
 
     ~FileStorage() override;
     FileStorage(const FileStorage&) = delete;
@@ -58,13 +60,12 @@ public:
     bool recovered_torn_tail() const { return recovered_torn_tail_; }
 
 private:
-    FileStorage(std::filesystem::path dir, int log_fd, raft::PersistentState state, bool torn, Sync sync);
+    FileStorage(std::filesystem::path dir, std::shared_ptr<Io> io, raft::PersistentState state, bool torn, Sync sync);
     void write_log(std::span<const std::byte> bytes);
-    void sync_file(int fd, const std::string& what) const;
 
     std::filesystem::path dir_;
     Sync sync_mode_ = Sync::Durable;
-    int log_fd_ = -1;
+    std::shared_ptr<Io> io_;
     raft::PersistentState state_;
     bool recovered_torn_tail_ = false;
 };

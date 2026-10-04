@@ -87,6 +87,16 @@ jobs:
       # repeating those in CI would add time and no information.
       - name: Repeat the real-process test 10 times
         run: ctest --preset ${{ matrix.preset }} -R '^cluster_smoke$' --repeat until-fail:10
+        env:
+          RAFTKV_SMOKE_EVIDENCE: ${{ github.workspace }}/smoke-evidence
+
+      - name: Keep the smoke test's evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-evidence-${{ matrix.compiler.cc }}-${{ matrix.preset }}
+          path: smoke-evidence
+          if-no-files-found: ignore
 
       - name: Benchmark smoke test
         if: matrix.preset == 'rel'

@@ -70,7 +70,7 @@ committed change is always on at least one server in any group that can elect a 
 ## How we know it actually works
 
 "It worked when I tried it" is not enough for this kind of system, because the bugs only show
-up when the timing is unlucky. So raftkv is tested three ways:
+up when the timing is unlucky. So raftkv is tested four ways:
 
 1. **A simulator.** The whole cluster runs inside one program, with a fake network and a fake
    clock that the test controls. Tests crash servers, lose messages and split the network on
@@ -85,6 +85,12 @@ up when the timing is unlucky. So raftkv is tested three ways:
 3. **Real crashes.** The real servers are started as separate programs, killed with
    `kill -9` mid-write, and restarted. This found a real crash bug that the simulator could
    not: [postmortem 002](docs/postmortems/002-pop-from-emptied-write-queue.md).
+4. **Pretend power cuts.** A program that is killed still leaves its last writes in the
+   computer's memory, which saves them later. A power cut does not. So the tests also run the
+   storage code on a fake disk that "loses power" at a random moment, throws away anything
+   not yet confirmed as saved, and checks that nothing confirmed was lost. This found a bug
+   where one badly timed power cut could stop a server from ever starting again:
+   [postmortem 004](docs/postmortems/004-interrupted-compaction.md).
 
 To check that the tests themselves are good, bugs were planted on purpose, and the tests
 had to catch them. They did, and where one slipped through, a new test was added. Every test
@@ -98,10 +104,10 @@ Measured on one laptop (Apple M5), with three real server processes. Full tables
 
 | Question | Answer |
 |---|---|
-| How many writes per second can 3 servers handle? | about **888** (32 clients at once) |
-| How long does one write take? | about **33 ms** (typical) |
-| If the leader server crashes, how long until writes work again? | about **314 ms** |
-| How much did writing to disk in batches help? | **4.7×** more writes per second |
+| How many writes per second can 3 servers handle? | about **815** (32 clients at once) |
+| How long does one write take? | about **37 ms** (typical) |
+| If the leader server crashes, how long until writes work again? | about **291 ms** |
+| How much did writing to disk in batches help? | **3.9×** more writes per second |
 | Did any test ever lose a write the store had confirmed? | **no** |
 <!-- results:end -->
 
@@ -144,8 +150,9 @@ tools/demo.sh
   over the network as if they were separate machines.
 - **You cannot add or remove servers** while it is running, and there is only one group of
   three (no splitting data across many groups).
-- **Power cuts are not tested.** Crashing a program is tested heavily, but cutting the power
-  to the disk would need special tools.
+- **Power cuts are tested on a fake disk, not a real one.** The fake disk follows the rules
+  real disks promise to follow. A real disk that breaks those promises (some cheap ones do)
+  can lose data no matter what the software does.
 
 ## Words used above
 
